@@ -189,20 +189,13 @@ class HospitalRepository:
                 .values(hospital_id=target_id)
             )
             # 병원 추가 요청(승인 시 생성되는 이력)의 병원 참조는 이름 기반이라 그대로 둔다.
-            # 관리 역할/채널 키는 hospital:{id} 이므로 옛 키를 지워 중복 생성을 막는다.
+            # 역할 매핑은 옛 키를 지워 중복 생성을 막는다.
             await session.execute(
                 delete(ManagedRole).where(ManagedRole.key == f"hospital:{source_id}")
             )
-            await session.execute(
-                delete(ManagedChannel).where(
-                    ManagedChannel.key.in_(
-                        [
-                            f"cat:hospital:{source_id}",
-                            f"ch:hospital:{source_id}",
-                        ]
-                    )
-                )
-            )
+            # 주의: managed_channels 기록은 **지우지 않는다**.
+            # 실제 디스코드 카테고리/채널을 삭제하려면 기록이 남아 있어야 하므로,
+            # 정리는 ChannelService._cleanup_legacy_hospital_channels 가 담당한다.
             # 별칭/병원 삭제
             await session.execute(
                 delete(HospitalAlias).where(HospitalAlias.hospital_id == source_id)
