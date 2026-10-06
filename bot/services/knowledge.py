@@ -75,6 +75,59 @@ class KnowledgeService:
         )
         return request_id, f"{hospital_name} · {admission.period_text()}"
 
+    async def submit_question(
+        self,
+        asker_id: int,
+        *,
+        hospital_id: int,
+        admit_ym: int,
+        discharge_ym: Optional[int],
+        period_text: str,
+        question: str,
+    ) -> tuple[Optional[int], str]:
+        """서류 인증자(asker)가 병원·기간과 함께 질문을 풀에 등록한다.
+
+        질문 풀은 이후 같은 병원·기간을 선택한 사용자에게 무작위로 제시된다.
+        """
+        question = question.strip()
+        if len(question) < 5:
+            return None, "질문 내용을 조금 더 구체적으로 입력해주세요."
+        request_id = await self.bot.knowledge.create(
+            asker_id=asker_id,
+            respondent_id=asker_id,  # 풀 질문은 아직 응답자 없음(자기 자신으로 표시)
+            hospital_id=hospital_id,
+            admit_ym=admit_ym,
+            discharge_ym=discharge_ym,
+            period_text=period_text,
+            question=question,
+        )
+        await self.bot.audit.log(
+            "knowledge.submit",
+            actor_id=asker_id,
+            target=f"knowledge:{request_id}",
+            detail=period_text,
+        )
+        return request_id, period_text
+
+    async def answer_to(
+        self, request_id: int, respondent_id: int, answer: str
+    ) -> Optional[KnowledgeVerification]:
+        """응답자가 풀 질문에 답한다 (상태 → awaiting_verdict)."""
+        req = await self.bot.knowledge.get_by_id(request_id)
+        if req is None or req.status != "awaiting_answer":
+            return None
+        answer = answer.strip()
+        if not answer:
+            return None
+        await self.bot.knowledge.set_answer(request_id, answer)
+        await self.bot.knowledge.set_status(request_id, "awaiting_verdict")
+        await self.bot.audit.log(
+            "knowledge.answer",
+            actor_id=respondent_id,
+            target=f"knowledge:{request_id}",
+        )
+        return await self.bot.knowledge.get_by_id(request_id)
+
     # ---------- 조회 ----------
 
     async def list_for_respondent(

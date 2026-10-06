@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import logging
+import random
 from datetime import datetime
 from typing import Optional
 
@@ -72,16 +73,22 @@ class HospitalChooseView(discord.ui.View):
     """병원을 **선택**(드롭다운)한다. 선택 후 다음 단계로 이어진다."""
 
     def __init__(
-        self, bot: MindFinderBot, service: VerificationService, mode: str
+        self,
+        bot: MindFinderBot,
+        service: VerificationService,
+        mode: str,
+        hospitals: Optional[list] = None,
     ) -> None:
         super().__init__(timeout=300)
         self.bot = bot
         self.service = service
         self.mode = mode
-        self.hospitals: list = []
+        # 주어진 목록이 있으면 그것만, 없으면 load() 에서 전체 병원을 채운다.
+        self.hospitals: list = list(hospitals) if hospitals else []
 
     async def load(self) -> "HospitalChooseView":
-        self.hospitals = list(await self.bot.hospitals.list_all())
+        if not self.hospitals:
+            self.hospitals = list(await self.bot.hospitals.list_all())
         options = [
             discord.SelectOption(
                 label=hospital_display_name(h.name)[:100], value=str(h.id)
@@ -119,23 +126,77 @@ class HospitalChooseView(discord.ui.View):
                 UnifiedVerifyModal(self.bot, self.service, hospital_id)
             )
             return
+        if self.mode == "knowledge":
+            await interaction.response.send_message(
+                f"**{hospital_display_name(hospital.name)}**\n"
+                "**해당 사건 또는 사실이 대략적으로 언제 일어났나요?**",
+                view=KnowledgeMonthPickerView(self.bot, hospital_id),
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_message(
             f"**{hospital_display_name(hospital.name)}** 입원 기간을 선택하세요.",
-            view=PeriodPickerView(self.bot, self.service, hospital_id),
+            view=PeriodPickerView(self.bot, self.service, hospital_id, self.mode),
             ephemeral=True,
         )
 
 
+class KnowledgeMonthPickerView(discord.ui.View):
+    """지식기반 인증: 사건·사실이 일어난 **단일 월**을 고른다 (범위 아님)."""
+
+    def __init__(self, bot: MindFinderBot, hospital_id: int) -> None:
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.hospital_id = hospital_id
+        self.year = discord.ui.Select(placeholder="연도", options=_year_options())
+        self.month = discord.ui.Select(placeholder="월", options=_month_options())
+        self.add_item(self.year)
+        self.add_item(self.month)
+
+    @discord.ui.button(label="이 달로 확인", style=discord.ButtonStyle.success, row=2)
+    async def submit(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        year = int(self.year.values[0]) if self.year.values else None
+        month = int(self.month.values[0]) if self.month.values else None
+        if year is None or month is None:
+            await interaction.response.send_message(
+                "⚠️ 연도와 월을 선택해주세요.", ephemeral=True
+            )
+            return
+        await interaction.response.edit_message(
+            content="✅ 선택한 시기로 질문을 찾습니다.", view=None
+        )
+        await run_knowledge_verification(
+            self.bot,
+            interaction,
+            hospital_id=self.hospital_id,
+            start_year=year,
+            start_month=month,
+            end_year=year,
+            end_month=month,
+            is_ongoing=False,
+        )
+
+
 class PeriodPickerView(discord.ui.View):
-    """연/월 드롭다운(Month Picker)으로 입원 기간을 고른다 (타이핑 없음)."""
+    """연/월 드롭다운(Month Picker)으로 입원 기간을 고른다 (타이핑 없음).
+
+    mode: admission(이력 등록) | other(기타 방법) | knowledge(지식기반)
+    """
 
     def __init__(
-        self, bot: MindFinderBot, service: VerificationService, hospital_id: int
+        self,
+        bot: MindFinderBot,
+        service: VerificationService,
+        hospital_id: int,
+        mode: str = "admission",
     ) -> None:
         super().__init__(timeout=300)
         self.bot = bot
         self.service = service
         self.hospital_id = hospital_id
+        self.mode = mode
 
         self.start_year = discord.ui.Select(
             placeholder="입원 연도", options=_year_options()
@@ -185,6 +246,54 @@ class PeriodPickerView(discord.ui.View):
                 "병원을 찾을 수 없습니다.", ephemeral=True
             )
             return
+        # 기타 방법 / 지식기반 인증은 다음 단계로 넘긴다 (이력 등록은 여기서 처리).
+        if self.mode == "other":
+            await interaction.response.send_modal(
+                OtherVerifyReasonModal(
+                    self.bot,
+                    self.service,
+                    hospital_id=self.hospital_id,
+                    start_year=start_year,
+                    start_month=start_month,
+                    end_year=end_year,
+                    end_month=end_month,
+                    is_ongoing=is_ongoing,
+                )
+            )
+            return
+        if self.mode == "knowledge":
+            await interaction.response.edit_message(
+                content=(
+                    "✅ 기간이 선택되었습니다. 아래에서 **지식기반 인증 질문**을 "
+                    "확인해 답변해주세요."
+                ),
+                view=None,
+            )
+            await run_knowledge_verification(
+                self.bot,
+                interaction,
+                hospital_id=self.hospital_id,
+                start_year=start_year,
+                start_month=start_month,
+                end_year=end_year,
+                end_month=end_month,
+                is_ongoing=is_ongoing,
+            )
+            return
+        if self.mode == "knowledge_ask":
+            await interaction.response.send_modal(
+                KnowledgeQuestionModal(
+                    self.bot,
+                    hospital_id=self.hospital_id,
+                    start_year=start_year,
+                    start_month=start_month,
+                    end_year=end_year,
+                    end_month=end_month,
+                    is_ongoing=is_ongoing,
+                )
+            )
+            return
+
         try:
             _id, period, hospital_name = await self.service.register_admission(
                 user_id=interaction.user.id,
@@ -218,6 +327,246 @@ class PeriodPickerView(discord.ui.View):
         )
         embed.set_footer(text="서류 인증을 받으면 병원·기간 커뮤니티와 매칭을 이용할 수 있습니다.")
         await interaction.response.edit_message(content=None, embed=embed, view=None)
+
+
+# --------------------------------------------------------------------------- #
+# 지식기반 인증 (기간 선택 후 질문 풀에서 무작위로 답변)
+# --------------------------------------------------------------------------- #
+class KnowledgeQuestionModal(discord.ui.Modal, title="지식기반 질문 등록"):
+    """서류 인증자(asker)가 병원·기간과 함께 질문을 풀에 등록한다."""
+
+    질문 = discord.ui.TextInput(
+        label="질문",
+        placeholder="그 시기·병원에 있었던 사람만 아는 질문을 적어주세요.",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=500,
+    )
+
+    def __init__(
+        self,
+        bot: MindFinderBot,
+        *,
+        hospital_id: int,
+        start_year: int,
+        start_month: int,
+        end_year: Optional[int],
+        end_month: Optional[int],
+        is_ongoing: bool,
+    ) -> None:
+        super().__init__()
+        self.bot = bot
+        self.hospital_id = hospital_id
+        self.start_year = start_year
+        self.start_month = start_month
+        self.end_year = end_year
+        self.end_month = end_month
+        self.is_ongoing = is_ongoing
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        def _ym(year: int, month: int) -> int:
+            return year * 12 + (month - 1)
+
+        start_ym = _ym(self.start_year, self.start_month)
+        end_ym = (
+            start_ym
+            if self.is_ongoing
+            else _ym(self.end_year or self.start_year, self.end_month or 1)
+        )
+        if end_ym < start_ym:
+            end_ym = start_ym
+        period_text = (
+            f"{self.start_year}년 {self.start_month}월 ~ "
+            + ("현재 입원 중" if self.is_ongoing else f"{self.end_year}년 {self.end_month}월")
+        )
+        hospital_name = await self.bot.knowledge_service.hospital_name(self.hospital_id)
+        request_id, message = await self.bot.knowledge_service.submit_question(
+            interaction.user.id,
+            hospital_id=self.hospital_id,
+            admit_ym=start_ym,
+            discharge_ym=None if self.is_ongoing else end_ym,
+            period_text=f"{hospital_name} {period_text}",
+            question=str(self.질문.value or ""),
+        )
+        if request_id is None:
+            await interaction.response.send_message(f"⚠️ {message}", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"✅ 질문이 등록되었습니다 (질문번호 `{request_id}`).\n"
+            f"**{hospital_display_name(hospital_name)} {period_text}** 기간을 "
+            "선택한 사람에게 무작위로 제시됩니다.",
+            ephemeral=True,
+        )
+
+
+class KnowledgeAnswerModal(discord.ui.Modal, title="지식기반 인증 답변"):
+    """제시된 질문에 답을 타이핑한다."""
+
+    답변 = discord.ui.TextInput(
+        label="답변",
+        placeholder="기억나는 대로 구체적으로 적어주세요.",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=500,
+    )
+
+    def __init__(
+        self,
+        bot: MindFinderBot,
+        request_id: int,
+        *,
+        hospital_id: int,
+        start_year: int,
+        start_month: int,
+        end_year: Optional[int],
+        end_month: Optional[int],
+        is_ongoing: bool,
+    ) -> None:
+        super().__init__()
+        self.bot = bot
+        self.request_id = request_id
+        self.hospital_id = hospital_id
+        self.start_year = start_year
+        self.start_month = start_month
+        self.end_year = end_year
+        self.end_month = end_month
+        self.is_ongoing = is_ongoing
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        req = await self.bot.knowledge_service.answer_to(
+            self.request_id, interaction.user.id, str(self.답변.value or "")
+        )
+        if req is None:
+            await interaction.followup.send(
+                "⚠️ 이미 처리된 질문입니다.", ephemeral=True
+            )
+            return
+
+        # 응답자 이력 등록(자기 신고) → 1단계 역할
+        try:
+            admission_id, period, hospital_name = await (
+                self.bot.verification_service.register_admission(
+                    user_id=interaction.user.id,
+                    hospital_name=await self.bot.knowledge_service.hospital_name(
+                        self.hospital_id
+                    ),
+                    start_year=self.start_year,
+                    start_month=self.start_month,
+                    end_year=self.end_year,
+                    end_month=self.end_month,
+                    is_ongoing=self.is_ongoing,
+                )
+            )
+        except PeriodError as exc:
+            await interaction.followup.send(f"⚠️ {exc}", ephemeral=True)
+            return
+
+        if interaction.guild is not None:
+            member = interaction.guild.get_member(interaction.user.id)
+            if member is not None:
+                try:
+                    await self.bot.access.grant_tier(interaction.guild, member, 1)
+                except Exception:  # noqa: BLE001
+                    logger.exception("1단계 역할 부여 실패: user=%s", interaction.user.id)
+
+        await interaction.followup.send(
+            "✅ 답변을 제출했습니다. 질문자가 확인하면 관리자 승인을 거쳐 "
+            "인증이 완료됩니다.",
+            ephemeral=True,
+        )
+
+
+async def run_knowledge_verification(
+    bot: MindFinderBot,
+    interaction: discord.Interaction,
+    *,
+    hospital_id: int,
+    start_year: int,
+    start_month: int,
+    end_year: Optional[int],
+    end_month: Optional[int],
+    is_ongoing: bool,
+) -> None:
+    """기간 선택 후, 해당 병원·기간 질문 풀에서 무작위로 하나를 내고 답변받는다."""
+    def _ym(year: int, month: int) -> int:
+        return year * 12 + (month - 1)
+
+    start_ym = _ym(start_year, start_month)
+    end_ym = start_ym if is_ongoing else _ym(end_year or start_year, end_month or 1)
+    if end_ym < start_ym:
+        end_ym = start_ym
+    pool = await bot.knowledge.list_question_pool(hospital_id, start_ym, end_ym)
+    pool = [q for q in pool if q.status in ("awaiting_answer", "awaiting_verdict")]
+    if not pool:
+        await interaction.followup.send(
+            "이 병원·기간에 등록된 지식기반 질문이 아직 없습니다. "
+            "잠시 후 다시 시도하거나 서류 인증을 이용해주세요.",
+            ephemeral=True,
+        )
+        return
+    question = random.choice(pool)
+    hospital_name = await bot.knowledge_service.hospital_name(hospital_id)
+    embed = discord.Embed(
+        title="❓ 지식기반 인증 질문",
+        description=(
+            f"**병원**: {hospital_display_name(hospital_name)}\n"
+            f"**기간**: {question.period_text}\n\n"
+            f"**질문**: {question.question}"
+        ),
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(text="그 시기·병원에 실제로 있었던 사람만 답할 수 있는 질문입니다.")
+    await interaction.followup.send(
+        embed=embed,
+        view=KnowledgeAnswerView(
+            bot,
+            question.id,
+            hospital_id=hospital_id,
+            start_year=start_year,
+            start_month=start_month,
+            end_year=end_year,
+            end_month=end_month,
+            is_ongoing=is_ongoing,
+        ),
+        ephemeral=True,
+    )
+
+
+class KnowledgeAnswerView(discord.ui.View):
+    """제시된 질문에 답변 버튼을 눌러 답을 작성한다."""
+
+    def __init__(
+        self,
+        bot: MindFinderBot,
+        request_id: int,
+        *,
+        hospital_id: int,
+        start_year: int,
+        start_month: int,
+        end_year: Optional[int],
+        end_month: Optional[int],
+        is_ongoing: bool,
+    ) -> None:
+        super().__init__(timeout=600)
+        self.bot = bot
+        self.request_id = request_id
+        self.kwargs = dict(
+            hospital_id=hospital_id,
+            start_year=start_year,
+            start_month=start_month,
+            end_year=end_year,
+            end_month=end_month,
+            is_ongoing=is_ongoing,
+        )
+
+    @discord.ui.button(label="답변 작성", style=discord.ButtonStyle.primary)
+    async def answer(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        await interaction.response.send_modal(
+            KnowledgeAnswerModal(self.bot, self.request_id, **self.kwargs)
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -377,66 +726,65 @@ class UnifiedVerifyModal(discord.ui.Modal, title="서류 인증"):
 
 
 # --------------------------------------------------------------------------- #
-# 모달: 기타 방법 인증 (서류·지식 외 · 관리자 수동 승인)
+# 모달: 기타 방법 인증 (병원·기간은 앞 단계에서 선택, 방법만 타이핑)
 # --------------------------------------------------------------------------- #
-class OtherVerifyModal(discord.ui.Modal, title="기타 방법 인증 신청"):
-    """서류·지식기반 외의 방법으로 인증을 신청한다 (관리자 수동 승인).
+class OtherVerifyReasonModal(discord.ui.Modal, title="기타 방법 인증"):
+    """병원·기간은 앞 단계에서 고르고, **기타 인증 방법만** 타이핑한다."""
 
-    예: 진료기록 사본, 병원 발급 서류의 사진, 보호자 확인 등. 서류 원본을
-    봇에 보관하지 않기 위해, 사유(경위)만 적어 제출하고 실제 확인은 관리자가
-    대화로 진행한다.
-    """
-
-    병원 = discord.ui.TextInput(
-        label="병원명",
-        placeholder="예: 국립정신건강센터",
-        required=True,
-        max_length=100,
-    )
-    기간 = discord.ui.TextInput(
-        label="입원 기간 (예: 2020-03 ~ 2020-06)",
-        placeholder="2020-03 ~ 2020-06 · 입원 중이면 시작만 입력",
-        required=True,
-        max_length=40,
-    )
-    사유 = discord.ui.TextInput(
-        label="인증이 필요한 이유 · 확인 방법",
-        placeholder="서류를 낼 수 없는 사정과, 어떻게 확인받을 수 있는지 적어주세요.",
+    인증방법 = discord.ui.TextInput(
+        label="기타 인증 방법",
+        placeholder="예: 진료기록 사본, 보호자 확인, 병원 발급 서류 사진 등",
         style=discord.TextStyle.paragraph,
         required=True,
         max_length=500,
     )
 
-    def __init__(self, bot: MindFinderBot, service: VerificationService) -> None:
+    def __init__(
+        self,
+        bot: MindFinderBot,
+        service: VerificationService,
+        *,
+        hospital_id: int,
+        start_year: int,
+        start_month: int,
+        end_year: Optional[int],
+        end_month: Optional[int],
+        is_ongoing: bool,
+    ) -> None:
         super().__init__()
         self.bot = bot
         self.service = service
+        self.hospital_id = hospital_id
+        self.start_year = start_year
+        self.start_month = start_month
+        self.end_year = end_year
+        self.end_month = end_month
+        self.is_ongoing = is_ongoing
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        try:
-            start_year, start_month, end_year, end_month = parse_period_input(
-                str(self.기간.value or "")
+        hospital = await self.bot.hospitals.get_by_id(self.hospital_id)
+        if hospital is None:
+            await interaction.response.send_message(
+                "⚠️ 병원을 찾을 수 없습니다.", ephemeral=True
             )
-        except PeriodError as exc:
-            await interaction.response.send_message(f"⚠️ {exc}", ephemeral=True)
             return
 
-        is_ongoing = end_year is None and end_month is None
+        reason = str(self.인증방법.value or "").strip()
+        await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             admission_id, period, hospital_name = await self.service.register_admission(
                 user_id=interaction.user.id,
-                hospital_name=str(self.병원.value or ""),
-                start_year=start_year,
-                start_month=start_month,
-                end_year=end_year,
-                end_month=end_month,
-                is_ongoing=is_ongoing,
+                hospital_name=hospital.name,
+                start_year=self.start_year,
+                start_month=self.start_month,
+                end_year=self.end_year,
+                end_month=self.end_month,
+                is_ongoing=self.is_ongoing,
             )
         except PeriodError as exc:
-            await interaction.response.send_message(f"⚠️ {exc}", ephemeral=True)
+            await interaction.followup.send(f"⚠️ {exc}", ephemeral=True)
             return
 
-        reason = str(self.사유.value or "").strip()
         request_id = await self.service.submit_other_proof(
             interaction.user.id, admission_id
         )
@@ -450,14 +798,11 @@ class OtherVerifyModal(discord.ui.Modal, title="기타 방법 인증 신청"):
                 except Exception:  # noqa: BLE001
                     logger.exception("1단계 역할 부여 실패: user=%s", interaction.user.id)
             try:
-                hospital = await self.bot.hospitals.get_by_name(hospital_name)
-                if hospital is not None:
-                    # 역할은 사용자가 커뮤니티 패널에서 선택할 때만 만든다.
-                    await self.bot.channel_service.ensure_hospital_channel(
-                        interaction.guild, hospital.id, hospital.name, with_role=False
-                    )
+                await self.bot.channel_service.ensure_hospital_channel(
+                    interaction.guild, hospital.id, hospital.name, with_role=False
+                )
             except Exception:  # noqa: BLE001
-                logger.exception("병원 채널 확보 실패: hospital=%s", hospital_name)
+                logger.exception("병원 채널 확보 실패: hospital=%s", hospital.id)
 
         await notify_admins_of_other_request(
             self.bot,
@@ -474,13 +819,12 @@ class OtherVerifyModal(discord.ui.Modal, title="기타 방법 인증 신청"):
                 f"**병원**: {hospital_display_name(hospital_name)}\n"
                 f"**기간**: {period.text()}\n"
                 f"**심사번호**: `{request_id}`\n\n"
-                "관리자가 확인 후 승인 여부를 알려드립니다.\n"
-                "추가 확인이 필요하면 관리자가 DM 으로 연락드릴 수 있습니다."
+                "**관리자가 확인 후 연락드리겠습니다.**"
             ),
             color=discord.Color.orange(),
         )
         embed.set_footer(text="서류·지식기반 인증이 어려울 때 사용하는 대체 경로입니다.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def notify_admins_of_other_request(
@@ -1227,15 +1571,7 @@ class VerifyPanelView(discord.ui.View):
                 ),
                 discord.SelectOption(
                     label="기타 방법 인증", value="other", emoji="✍️",
-                    description="서류·지식 외 방법으로 관리자 수동 승인 요청",
-                ),
-                discord.SelectOption(
-                    label="지식기반 질문 보내기", value="ask", emoji="❓",
-                    description="같은 병원·시기 동료에게 병동 경험 질문 보내기",
-                ),
-                discord.SelectOption(
-                    label="지식 인증 현황", value="kstatus", emoji="🧠",
-                    description="받은 질문 답변 / 보낸 질문 판정",
+                    description="병원·기간 선택 후 기타 방법으로 관리자 승인 요청",
                 ),
                 discord.SelectOption(
                     label="기타 병원 직접 입력", value="request", emoji="🏥",
@@ -1261,8 +1597,6 @@ class VerifyPanelView(discord.ui.View):
             "admission": self._do_admission,
             "verify": self._do_verify,
             "other": self._do_other,
-            "ask": self._do_ask,
-            "kstatus": self._do_kstatus,
             "request": self._do_request,
             "history": self._do_history,
         }.get(values[0])
@@ -1305,7 +1639,14 @@ class VerifyPanelView(discord.ui.View):
 
     async def _do_other(self, interaction: discord.Interaction) -> None:
         async def _proceed(inner: discord.Interaction) -> None:
-            await inner.response.send_modal(OtherVerifyModal(self.bot, self.vservice))
+            view = await HospitalChooseView(
+                self.bot, self.vservice, "other"
+            ).load()
+            await inner.response.send_message(
+                "기타 방법 인증을 진행할 **병원을 선택**하세요.",
+                view=view,
+                ephemeral=True,
+            )
 
         if not await ensure_consent(self.bot, interaction, _proceed):
             return
@@ -1759,6 +2100,99 @@ class CommunityPanelView(discord.ui.View):
             view=HospitalRoleDeselectView(self.bot, hospitals),
             ephemeral=True,
         )
+
+    async def _verified_hospitals_for(self, user_id: int) -> list:
+        """사용자가 서류 인증(verified)을 받은 병원 객체 목록."""
+        admissions = await self.bot.admissions.list_by_user(user_id)
+        verified_ids = {a.hospital_id for a in admissions if a.verification == "verified"}
+        hospitals = []
+        for hospital in await self.bot.hospitals.list_all():
+            if hospital.id in verified_ids:
+                hospitals.append(hospital)
+        return hospitals
+
+    @discord.ui.button(
+        label="지식기반 인증", style=discord.ButtonStyle.success,
+        custom_id="mf:c_kverify", row=1,
+    )
+    async def knowledge_verify(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """병원·기간을 선택하면 그 기간 질문 풀에서 무작위 질문에 답한다."""
+        async def _proceed(inner: discord.Interaction) -> None:
+            view = await HospitalChooseView(
+                self.bot, VerificationService(self.bot), "knowledge"
+            ).load()
+            await inner.response.send_message(
+                "지식기반 인증을 진행할 **병원을 선택**하세요.",
+                view=view,
+                ephemeral=True,
+            )
+
+        if not await ensure_consent(self.bot, interaction, _proceed):
+            return
+        await _proceed(interaction)
+
+    @discord.ui.button(
+        label="지식기반 질문 등록", style=discord.ButtonStyle.success,
+        custom_id="mf:c_kask", row=1,
+    )
+    async def knowledge_ask(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """서류 인증자가 본인 병원·기간에 대한 질문을 풀에 등록한다."""
+        hospitals = await self._verified_hospitals_for(interaction.user.id)
+        if not hospitals:
+            await interaction.response.send_message(
+                "먼저 **서류 인증** 을 완료해야 질문을 등록할 수 있습니다.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "질문을 등록할 **병원을 선택**하세요.",
+            view=await HospitalChooseView(
+                self.bot, VerificationService(self.bot), "knowledge_ask",
+                hospitals=hospitals,
+            ).load(),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="지식 인증 현황", style=discord.ButtonStyle.secondary,
+        custom_id="mf:c_kstatus", row=1,
+    )
+    async def knowledge_status(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """내가 보낸 질문의 응답/판정 현황을 보여준다."""
+        sent = await self.bot.knowledge.list_for_asker(interaction.user.id)
+        embed = discord.Embed(title="🧠 지식기반 질문 현황", color=discord.Color.blurple())
+        if sent:
+            lines = [
+                f"#{r.id} · {r.period_text} — "
+                + {
+                    "awaiting_answer": "응답 대기",
+                    "awaiting_verdict": "판정 대기",
+                    "asker_confirmed": "관리자 승인 대기",
+                    "asker_rejected": "오답 처리",
+                    "approved": "승인 완료",
+                    "rejected": "거절",
+                }.get(r.status, r.status)
+                for r in sent[:8]
+            ]
+            embed.add_field(name="내가 등록한 질문", value="\n".join(lines), inline=False)
+        else:
+            embed.description = "등록한 지식기반 질문이 없습니다."
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        to_verdict = await self.bot.knowledge_service.list_for_respondent(
+            interaction.user.id, "awaiting_verdict"
+        )
+        if to_verdict:
+            await interaction.followup.send(
+                "판정할 질문이 있습니다.",
+                view=VerdictView(self.bot, to_verdict[0].id),
+                ephemeral=True,
+            )
 
     @discord.ui.button(
         label="내 기간 스레드", style=discord.ButtonStyle.primary,

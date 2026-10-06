@@ -947,6 +947,28 @@ class KnowledgeVerificationRepository:
             )
             return result.scalars().all()
 
+    async def list_question_pool(
+        self, hospital_id: int, start_ym: int, end_ym: int
+    ) -> Sequence[KnowledgeVerification]:
+        """특정 병원·기간과 겹치는 '질문 풀'.
+
+        asker(서류 인증자)가 올린 질문 중 입원 기간이 겹치는 것을 모은다.
+        """
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(KnowledgeVerification)
+                .where(
+                    KnowledgeVerification.hospital_id == hospital_id,
+                    KnowledgeVerification.admit_ym <= end_ym,
+                    or_(
+                        KnowledgeVerification.discharge_ym.is_(None),
+                        KnowledgeVerification.discharge_ym >= start_ym,
+                    ),
+                )
+                .order_by(KnowledgeVerification.created_at.desc())
+            )
+            return result.scalars().all()
+
 
 class ConsentRepository:
     """consent_records 테이블 접근 (개인정보 처리방침·서비스 이용약관 동의)."""
