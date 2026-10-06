@@ -246,25 +246,30 @@ class VerificationService:
             )
 
         # 6) 중복 문서 방지 (문서확인번호)
+        #    승인(approved)된 문서만 중복으로 막는다. 실패(rejected)한 문서는
+        #    재시도할 수 있도록 기존 기록을 지우고 진행한다.
         existing = await self.bot.verifications.find_by_document_no(cert.document_no)
         if existing is not None:
-            if existing.user_id == user_id:
-                detail = (
-                    "이미 **본인이** 이 문서로 인증을 완료했습니다. "
-                    "같은 서류로는 다시 인증할 수 없습니다."
+            if existing.status == "approved":
+                if existing.user_id == user_id:
+                    detail = (
+                        "이미 **본인이** 이 문서로 인증을 완료했습니다. "
+                        "같은 서류로는 다시 인증할 수 없습니다."
+                    )
+                else:
+                    detail = (
+                        "이미 등록된 문서입니다(다른 사용자). 동일한 서류로는 "
+                        "중복 인증할 수 없습니다."
+                    )
+                return AutoVerifyResult(
+                    approved=False,
+                    title="중복 문서",
+                    color="orange",
+                    detail=detail,
+                    document_no=cert.document_no,
                 )
-            else:
-                detail = (
-                    "이미 등록된 문서입니다(다른 사용자). 동일한 서류로는 "
-                    "중복 인증할 수 없습니다."
-                )
-            return AutoVerifyResult(
-                approved=False,
-                title="중복 문서",
-                color="orange",
-                detail=detail,
-                document_no=cert.document_no,
-            )
+            # 실패했던 기록은 초기화하고 재시도한다.
+            await self.bot.verifications.delete(existing.id)
 
         # 6-1) 중복 서류 방지 (지문/유사도). 원본은 저장하지 않고 지문만 대조한다.
         duplicate_reason = await self.check_duplicate_fingerprint(cert.raw_text)
@@ -322,7 +327,8 @@ class VerificationService:
             result = await client.verify(cert.document_no)
         except Exception as exc:  # noqa: BLE001 - 네트워크/파싱 오류 모두 안내
             logger.warning("진위확인 API 오류: %s", exc)
-            await self.bot.admissions.set_verification(admission_id, "rejected")
+            # 실패 시 이력을 반려하지 않고 재시도할 수 있도록 초기화한다.
+            await self._reset_failed_attempt(admission_id, cert.document_no)
             return AutoVerifyResult(
                 approved=False,
                 title="통신 오류",
@@ -359,6 +365,9 @@ class VerificationService:
         await self.bot.admissions.set_verification(
             admission_id, "verified" if approved else "rejected"
         )
+        if not approved:
+            # 실패한 시도는 재시도할 수 있도록 요청/이력을 초기화한다.
+            await self._reset_failed_attempt(admission_id, cert.document_no)
         await self.bot.audit.log(
             "verification.auto",
             actor_id=user_id,
@@ -387,6 +396,27 @@ class VerificationService:
             ),
             truth_message=result.message,
         )
+
+    async def _reset_failed_attempt(
+        self, admission_id: Optional[int], document_no: Optional[str]
+    ) -> None:
+        """자동 진위확인 실패 시 재시도할 수 있도록 흔적을 초기화한다.
+
+        - 이력이 'rejected' 로 남지 않도록 자기 신고 상태로 되돌린다.
+        - 문서확인번호에 묶인 실패 기록(unique)을 삭제한다.
+        """
+        if admission_id is not None:
+            try:
+                await self.bot.admissions.set_verification(
+                    admission_id, "self_reported"
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("실패 이력 초기화 실패: admission=%s", admission_id)
+        if document_no:
+            try:
+                await self.bot.verifications.delete_by_document_no(document_no)
+            except Exception:  # noqa: BLE001
+                logger.exception("실패 검증 기록 초기화 실패: doc=%s", document_no)
 
     # ---------- 관리자 심사 ----------
 

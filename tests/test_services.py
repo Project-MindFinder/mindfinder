@@ -328,8 +328,11 @@ async def test_auto_verify_invalid_marks_rejected(
 
     assert result.approved is False
     assert result.color == "red"
+    # 실패한 시도는 재시도할 수 있도록 자기 신고 상태로 초기화된다.
     rows = await bot.admissions.list_by_user(1)
-    assert rows[0].verification == "rejected"
+    assert rows[0].verification == "self_reported"
+    # 실패한 자동 인증 기록은 삭제되어 재시도를 막지 않는다.
+    assert await bot.verifications.find_by_document_no("DOC-123") is None
 
 
 async def test_submit_and_approve_flow(

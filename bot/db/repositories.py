@@ -239,6 +239,20 @@ class AdmissionRepository:
             )
             await session.commit()
 
+    async def reset_rejected(self) -> int:
+        """반려(rejected)된 이력을 자기 신고 상태로 되돌린다 (재시도 허용).
+
+        Returns: 되돌린 행 수.
+        """
+        async with self.db.session() as session:
+            result = await session.execute(
+                update(Admission)
+                .where(Admission.verification == "rejected")
+                .values(verification="self_reported")
+            )
+            await session.commit()
+            return result.rowcount or 0
+
     async def find_overlapping(
         self,
         hospital_id: int,
@@ -420,6 +434,41 @@ class VerificationRepository:
     async def get_by_id(self, request_id: int) -> Optional[VerificationRequest]:
         async with self.db.session() as session:
             return await session.get(VerificationRequest, request_id)
+
+    async def delete(self, request_id: int) -> None:
+        """검증 요청을 삭제한다 (실패/중복 재시도 초기화용)."""
+        async with self.db.session() as session:
+            req = await session.get(VerificationRequest, request_id)
+            if req is not None:
+                await session.delete(req)
+            await session.commit()
+
+    async def delete_by_document_no(self, document_no: str) -> None:
+        """문서확인번호로 검증 요청을 삭제한다 (실패 재시도 초기화용)."""
+        if not document_no:
+            return
+        async with self.db.session() as session:
+            await session.execute(
+                delete(VerificationRequest).where(
+                    VerificationRequest.document_no == document_no
+                )
+            )
+            await session.commit()
+
+    async def delete_rejected(self) -> int:
+        """자동 진위확인이 실패(rejected)한 기록을 삭제한다 (재시도 허용).
+
+        Returns: 삭제한 행 수.
+        """
+        async with self.db.session() as session:
+            result = await session.execute(
+                delete(VerificationRequest).where(
+                    VerificationRequest.status == "rejected",
+                    VerificationRequest.auto_verified.is_(True),
+                )
+            )
+            await session.commit()
+            return result.rowcount or 0
 
     async def list_pending(self) -> Sequence[VerificationRequest]:
         async with self.db.session() as session:
