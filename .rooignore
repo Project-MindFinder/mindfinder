@@ -1,0 +1,56 @@
+# ============================================
+# Roo Code 무시 목록 (.rooignore)
+# AI 어시스턴트가 읽거나 수정하지 않아야 하는 파일/디렉터리.
+# .gitignore 와 유사한 문법(glob)을 사용합니다.
+# ============================================
+
+# 비밀값 / 환경변수 (절대 읽지 않음)
+.env
+*.env
+!.env.example
+
+# 개인정보가 포함될 수 있는 증빙 서류 (PDF 등)
+*.pdf
+
+# SQLite 데이터베이스 및 백업 (런타임 데이터)
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+/backups/
+
+# 로그
+/logs/
+*.log
+
+# 가상환경 / 빌드 산출물
+.venv/
+venv/
+env/
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# 캐시 / 커버리지
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 에디터 / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 임시 조사/디버그 산출물 (밑줄 접두사)
+_*.py
+_*.html
+_*.txt
