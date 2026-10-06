@@ -85,6 +85,12 @@ class FakeTextChannel:
     async def send(self, **kwargs) -> None:  # noqa: ANN003
         self.sent.append(kwargs)
 
+    async def edit(self, **kwargs) -> None:  # noqa: ANN003
+        """채널 이름/토픽 변경 대역 (매칭 채널 고유번호 이름 반영)."""
+        if "name" in kwargs:
+            self.name = kwargs["name"]
+        self.edited = kwargs
+
     async def set_permissions(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
         return None
 
@@ -546,9 +552,15 @@ async def test_accept_match_creates_channel(
     assert result.channel is not None
     assert result.hospital_name == "서울대학교병원"
 
-    # DB 에 채널/멤버가 등록되어야 한다.
+    # 채널 이름은 병원명이 아니라 고유번호(예: 매칭-1)로 지어져야 한다.
+    assert result.channel.name.startswith("매칭-")
+    assert result.channel.name != "매칭-대기"
+    assert "서울대" not in result.channel.name
+
+    # DB 에 채널/멤버/이름이 등록되어야 한다.
     record = await bot.match_channels.get_by_discord_id(result.channel.id)
     assert record is not None
+    assert record.name == result.channel.name
     members = await bot.match_channels.list_members(record.id)
     assert sorted(members) == [1, 2]
 

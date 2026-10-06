@@ -268,7 +268,11 @@ class MatchingService:
         hospital_id: Optional[int],
         hospital_name: str,
     ) -> Optional[discord.TextChannel]:
-        """두 사용자가 함께 쓸 매칭 채널을 확보한다."""
+        """두 사용자가 함께 쓸 매칭 채널을 확보한다.
+
+        채널 이름은 병원명 대신 **고유번호** 로 짓고(예: 매칭-12), 병원 정보는
+        채널 토픽과 DB(hospital_id)로 관리한다.
+        """
         existing = await self.bot.match_channels.find_open_for_users(
             list(member_ids), hospital_id
         )
@@ -315,10 +319,13 @@ class MatchingService:
             if isinstance(fetched, discord.CategoryChannel):
                 category = fetched
 
-        name = self.channel_name(hospital_name)
+        # 채널 이름은 병원명이 아니라 **고유번호** 로 관리한다.
+        # 1) 임시 이름으로 채널을 먼저 만들고,
+        # 2) DB 에 등록해 id 를 받은 뒤,
+        # 3) 그 id 로 이름(예: 매칭-12)을 바꾼다.
         try:
             channel = await guild.create_text_channel(
-                name=name,
+                name="매칭-대기",
                 category=category,
                 overwrites=overwrites,
                 topic=(
@@ -334,21 +341,31 @@ class MatchingService:
             logger.exception("매칭 채널 생성 실패: guild=%s", guild.id)
             return None
 
-        await self.bot.match_channels.create(
+        record_id = await self.bot.match_channels.create(
             discord_channel_id=channel.id,
             guild_id=guild.id,
             hospital_id=hospital_id,
             member_ids=list(member_ids),
+            name=None,
         )
+        name = self.channel_name(record_id)
+        try:
+            await channel.edit(
+                name=name,
+                topic=(
+                    f"MindFinder 매칭 채널 #{record_id} · {hospital_name} · "
+                    "참여자끼리 자유롭게 대화하세요."
+                ),
+                reason="MindFinder 매칭 채널 이름(고유번호) 반영",
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            logger.debug("매칭 채널 이름 변경 실패: channel=%s", channel.id)
+        await self.bot.match_channels.set_name(record_id, name)
         return channel
 
-    def channel_name(self, hospital_name: str) -> str:
-        """디스코드 채널 이름 규칙에 맞게 매칭 채널 이름을 만든다."""
-        safe = "".join(
-            ch if ch.isalnum() else "-" for ch in hospital_name
-        ).strip("-")
-        safe = safe or "동료"
-        return f"매칭-{safe}"[:90]
+    def channel_name(self, record_id: int) -> str:
+        """매칭 채널 이름을 **고유번호** 로 만든다 (예: 매칭-12)."""
+        return f"매칭-{record_id}"
 
     async def announce_match(
         self, channel: discord.TextChannel, member_ids: Sequence[int],

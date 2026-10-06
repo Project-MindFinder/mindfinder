@@ -292,6 +292,8 @@ class MatchChannel(Base):
         BigInteger, unique=True, nullable=False, index=True
     )
     guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    # 디스코드 채널 이름 (예: 매칭-12). 병원명 대신 고유번호로 관리한다.
+    name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     # 같은 병원 기준으로 채널을 묶기 위한 참조 (병원 삭제 시 NULL)
     hospital_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("hospitals.id", ondelete="SET NULL"), nullable=True, index=True

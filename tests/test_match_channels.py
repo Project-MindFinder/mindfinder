@@ -50,6 +50,42 @@ async def test_create_registers_members(repo: MatchChannelRepository) -> None:
     assert sorted(members) == [10, 20]
 
 
+async def test_create_stores_name(repo: MatchChannelRepository) -> None:
+    """매칭 채널 이름(고유번호)을 함께 저장할 수 있어야 한다."""
+    channel_id = await repo.create(
+        discord_channel_id=1100,
+        guild_id=1,
+        hospital_id=None,
+        member_ids=[10, 20],
+        name="매칭-12",
+    )
+    record = await repo.get_by_id(channel_id)
+    assert record is not None
+    assert record.name == "매칭-12"
+
+
+async def test_set_name_updates_name(repo: MatchChannelRepository) -> None:
+    channel_id = await repo.create(
+        discord_channel_id=1101, guild_id=1, hospital_id=None, member_ids=[10]
+    )
+    await repo.set_name(channel_id, "매칭-7")
+    record = await repo.get_by_id(channel_id)
+    assert record is not None and record.name == "매칭-7"
+
+
+async def test_set_discord_channel_updates_id_and_name(
+    repo: MatchChannelRepository,
+) -> None:
+    channel_id = await repo.create(
+        discord_channel_id=1102, guild_id=1, hospital_id=None, member_ids=[10]
+    )
+    await repo.set_discord_channel(channel_id, 7777, "매칭-9")
+    record = await repo.get_by_id(channel_id)
+    assert record is not None
+    assert record.discord_channel_id == 7777
+    assert record.name == "매칭-9"
+
+
 async def test_create_deduplicates_members(repo: MatchChannelRepository) -> None:
     channel_id = await repo.create(
         discord_channel_id=1001,
