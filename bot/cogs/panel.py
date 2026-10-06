@@ -1617,6 +1617,10 @@ class VerifyPanelView(discord.ui.View):
                     description="병원을 고른 뒤 서류·기간으로 2단계 인증",
                 ),
                 discord.SelectOption(
+                    label="지식기반 인증", value="knowledge", emoji="🧠",
+                    description="병원·시기를 고르고 그 시기 경험 질문에 답해 인증",
+                ),
+                discord.SelectOption(
                     label="기타 방법 인증", value="other", emoji="✍️",
                     description="병원·기간 선택 후 기타 방법으로 관리자 승인 요청",
                 ),
@@ -1638,6 +1642,7 @@ class VerifyPanelView(discord.ui.View):
             return
         handler = {
             "verify": self._do_verify,
+            "knowledge": self._do_knowledge,
             "other": self._do_other,
             "request": self._do_request,
         }.get(values[0])
@@ -1670,6 +1675,22 @@ class VerifyPanelView(discord.ui.View):
             ).load()
             await inner.response.send_message(
                 "기타 방법 인증을 진행할 **병원을 선택**하세요.",
+                view=view,
+                ephemeral=True,
+            )
+
+        if not await ensure_consent(self.bot, interaction, _proceed):
+            return
+        await _proceed(interaction)
+
+    async def _do_knowledge(self, interaction: discord.Interaction) -> None:
+        """서류 인증을 마친 사람이 병원·시기를 골라 지식기반 인증을 진행한다."""
+        async def _proceed(inner: discord.Interaction) -> None:
+            view = await HospitalChooseView(
+                self.bot, self.vservice, "knowledge"
+            ).load()
+            await inner.response.send_message(
+                "지식기반 인증을 진행할 **병원을 선택**하세요.",
                 view=view,
                 ephemeral=True,
             )

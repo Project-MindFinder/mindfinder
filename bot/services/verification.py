@@ -88,15 +88,12 @@ class VerificationService:
         fingerprint = fingerprint_utils.fingerprint_text(raw_text)
         if not fingerprint.fingerprint:
             return None
-        for stored_hash, stored_shingles in await self.bot.verifications.list_fingerprints():
-            if fingerprint_utils.is_similar(
-                fingerprint, stored_hash, stored_shingles
-            ):
-                if stored_hash == fingerprint.fingerprint:
-                    return "동일한 서류가 이미 제출되어 있습니다."
-                return (
-                    "이미 제출된 서류와 매우 유사합니다 (표현만 다른 같은 서류일 수 있습니다)."
-                )
+        # 주의: 같은 병원의 동일 서식 서류는 개인·기간이 달라도 서식 문구 때문에
+        # 유사도가 높게 나온다. 따라서 '표현만 다른 같은 서류' 판정은 하지 않고,
+        # 정규화 텍스트가 **완전히 동일한**(동일 지문) 경우만 중복으로 막는다.
+        for stored_hash, _stored_shingles in await self.bot.verifications.list_fingerprints():
+            if stored_hash == fingerprint.fingerprint:
+                return "동일한 서류가 이미 제출되어 있습니다."
         return None
 
     # ---------- 병원 정규화 ----------

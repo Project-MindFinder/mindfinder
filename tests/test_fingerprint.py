@@ -57,12 +57,13 @@ def test_same_document_same_fingerprint() -> None:
     assert a.fingerprint == a2.fingerprint
 
 
-def test_different_personal_info_same_structure_is_similar() -> None:
+def test_different_personal_info_same_structure_is_not_duplicate() -> None:
     a = fp.fingerprint_text(DOC_TEXT_A)
     b = fp.fingerprint_text(DOC_TEXT_B)
-    # 성명·문서번호만 다른 같은 서식 → 지문은 달라도 유사도는 높다.
+    # 성명·문서번호만 다른 같은 서식 → 지문은 다르고, 임계값 아래라 중복이 아니다.
+    # (같은 서식의 '서로 다른 서류'를 중복으로 오판하지 않도록 임계값을 높게 둔다.)
     assert a.fingerprint != b.fingerprint
-    assert a.similarity(b) >= fp.DEFAULT_SIMILARITY_THRESHOLD
+    assert a.similarity(b) < fp.DEFAULT_SIMILARITY_THRESHOLD
 
 
 def test_unrelated_documents_are_not_similar() -> None:
@@ -78,13 +79,13 @@ def test_encode_decode_roundtrip() -> None:
     assert decoded == f.shingles
 
 
-def test_is_similar_by_hash_and_by_similarity() -> None:
+def test_is_similar_only_on_identical_text() -> None:
     a = fp.fingerprint_text(DOC_TEXT_A)
     b = fp.fingerprint_text(DOC_TEXT_B)
-    # 해시 완전 일치
+    # 해시 완전 일치 → 동일 서류
     assert fp.is_similar(a, a.fingerprint, fp.encode_shingles(a.shingles))
-    # 유사도 기반
-    assert fp.is_similar(b, a.fingerprint, fp.encode_shingles(a.shingles))
+    # 같은 서식·개인정보만 다른 서류는 중복으로 보지 않는다.
+    assert not fp.is_similar(b, a.fingerprint, fp.encode_shingles(a.shingles))
     # 무관한 서류
     c = fp.fingerprint_text(DOC_TEXT_C)
     assert not fp.is_similar(c, a.fingerprint, fp.encode_shingles(a.shingles))
@@ -147,7 +148,7 @@ async def test_service_detects_duplicate_submission(
 
     # 동일 서류 재제출 → 중복 탐지
     assert await service.check_duplicate_fingerprint(DOC_TEXT_A) is not None
-    # 개인정보만 다른 같은 서식 → 유사 서류로 탐지
-    assert await service.check_duplicate_fingerprint(DOC_TEXT_B) is not None
+    # 개인정보만 다른 같은 서식(다른 서류) → 중복 아님
+    assert await service.check_duplicate_fingerprint(DOC_TEXT_B) is None
     # 무관한 서류 → 중복 아님
     assert await service.check_duplicate_fingerprint(DOC_TEXT_C) is None
