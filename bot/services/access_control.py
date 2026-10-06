@@ -5,10 +5,11 @@
 
 인증 단계(tier):
   - tier 0 : 아무 이력 없음 → 인증(안내) 채널만 접근
-  - tier 1 : 자기 신고 이력 등록 → 전체 커뮤니티 열람
-  - tier 2 : 서류/진위확인 통과 → 병원·기간·매칭 채널 이용
+  - tier 1 : 자기 신고 이력 등록 → '임시인증' (전체 커뮤니티 열람)
+  - tier 2 : 서류/지식 인증 완료 → '인증됨' (병원·기간·매칭 채널 이용)
 
-지식기반 인증으로 병원별 인증을 받은 사용자는 해당 병원 채널만 추가로 볼 수 있다.
+병원별 역할은 **사용자가 커뮤니티 패널에서 직접 선택했을 때만** 부여하고,
+선택 상태는 DB(hospital_optins)에 저장한다. (서버 역할은 최소화)
 """
 
 from __future__ import annotations
@@ -27,9 +28,9 @@ logger = logging.getLogger(__name__)
 TIER1_KEY = "tier1"
 TIER2_KEY = "tier2"
 
-# 봇이 자동 생성할 역할 이름
-TIER1_ROLE_NAME = "MindFinder 인증됨"
-TIER2_ROLE_NAME = "MindFinder 서류인증"
+# 봇이 자동 생성할 역할 이름 (접두어 없이 간결하게)
+TIER1_ROLE_NAME = "임시인증"
+TIER2_ROLE_NAME = "인증됨"
 
 # 역할 이름 최대 길이 (디스코드 제한)
 _MAX_ROLE_NAME = 100
@@ -49,7 +50,8 @@ class AccessControlService:
 
     @staticmethod
     def hospital_role_name(hospital_name: str) -> str:
-        name = f"MF·{hospital_name}"
+        # 예: "서울대학교병원 인증됨" (접두어 없이 병원명 + 인증됨)
+        name = f"{hospital_name} {TIER2_ROLE_NAME}"
         return name[:_MAX_ROLE_NAME]
 
     # ---------- 역할 확보 ----------
@@ -168,8 +170,44 @@ class AccessControlService:
         hospital_id: int,
         hospital_name: str,
     ) -> None:
+        """특정 병원 역할을 부여한다 (사용자가 해당 병원 역할을 '선택'했을 때)."""
         role = await self.hospital_role(guild, hospital_id, hospital_name)
         await self._add_role(member, role)
+
+    async def revoke_hospital_role(
+        self, guild: discord.Guild, member: discord.Member, hospital_id: int
+    ) -> None:
+        """특정 병원 역할을 회수한다 (역할 '해제')."""
+        record = await self.bot.managed_roles.get(
+            guild.id, self.hospital_role_key(hospital_id)
+        )
+        if record is None:
+            return
+        role = guild.get_role(record.discord_id)
+        if role is None or role not in member.roles:
+            return
+        try:
+            await member.remove_roles(role, reason="MindFinder 병원 역할 해제")
+        except discord.Forbidden:
+            logger.warning("역할 회수 권한 없음: member=%s role=%s", member.id, role.id)
+        except discord.HTTPException:
+            logger.exception("역할 회수 실패: member=%s role=%s", member.id, role.id)
+
+    # ---------- 병원 역할 선택(opt-in) — DB 저장 ----------
+
+    async def is_hospital_optin(self, user_id: int, hospital_id: int) -> bool:
+        """사용자가 해당 병원 역할을 선택했는지 여부 (DB)."""
+        return await self.bot.hospital_optins.is_opted_in(user_id, hospital_id)
+
+    async def set_hospital_optin(
+        self, user_id: int, hospital_id: int, enabled: bool
+    ) -> None:
+        """병원 역할 선택 상태를 DB 에 저장한다."""
+        await self.bot.hospital_optins.set_optin(user_id, hospital_id, enabled)
+
+    async def optedin_hospital_ids(self, user_id: int) -> Sequence[int]:
+        """사용자가 선택한 병원 id 목록 (DB)."""
+        return await self.bot.hospital_optins.list_for_user(user_id)
 
     # ---------- 조회 ----------
 

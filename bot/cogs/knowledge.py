@@ -233,15 +233,13 @@ class KnowledgeCog(commands.Cog):
             if member is None:
                 continue
             try:
-                await self.bot.access.grant_hospital_role(
-                    guild, member, req.hospital_id, hospital_name
-                )
+                # 병원 역할은 사용자가 커뮤니티 패널에서 선택할 때만 부여한다.
                 await self.bot.access.grant_tier(guild, member, 1)
             except Exception:  # noqa: BLE001
                 logger.exception("지식인증 역할 부여 실패: user=%s", req.respondent_id)
             try:
                 await self.bot.channel_service.ensure_hospital_channel(
-                    guild, req.hospital_id, hospital_name
+                    guild, req.hospital_id, hospital_name, with_role=False
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("병원 채널 확보 실패: hospital=%s", req.hospital_id)

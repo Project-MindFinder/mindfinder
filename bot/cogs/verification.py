@@ -107,8 +107,9 @@ class ManualProofModal(discord.ui.Modal, title="서류 심사 신청"):
                 except Exception:  # noqa: BLE001
                     logger.exception("1단계 역할 부여 실패: user=%s", interaction.user.id)
             try:
+                # 역할은 사용자가 커뮤니티 패널에서 선택할 때만 만든다.
                 await self.bot.channel_service.ensure_hospital_channel(
-                    interaction.guild, self.hospital_id, hospital_name
+                    interaction.guild, self.hospital_id, hospital_name, with_role=False
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("병원 채널 확보 실패: hospital=%s", self.hospital_id)
@@ -309,8 +310,9 @@ class VerificationCog(commands.Cog):
             hospital = await self.bot.hospitals.get_by_name(hospital_name)
             if hospital is not None:
                 try:
+                    # 역할은 사용자가 커뮤니티 패널에서 선택할 때만 만든다.
                     await self.bot.channel_service.ensure_hospital_channel(
-                        interaction.guild, hospital.id, hospital_name
+                        interaction.guild, hospital.id, hospital_name, with_role=False
                     )
                 except Exception:  # noqa: BLE001
                     logger.exception("병원 채널 확보 실패: hospital=%s", hospital.id)
@@ -644,25 +646,18 @@ class VerificationCog(commands.Cog):
         except Exception:  # noqa: BLE001
             logger.exception("2단계 역할 부여 실패: user=%s", user_id)
 
-        # 병원 역할 + 병원 채널 확보
+        # 병원 채널 확보 (역할은 사용자가 커뮤니티 패널에서 선택할 때만 부여)
         hospital_name = getattr(result, "hospital_name", None)
         if hospital_name:
             hospital = await self.bot.hospitals.get_by_name(hospital_name)
             if hospital is None:
                 hospital = await self.service.resolve_hospital(hospital_name)
             try:
-                await self.bot.access.grant_hospital_role(
-                    guild, member, hospital.id, hospital.name
-                )
                 await self.bot.channel_service.ensure_hospital_channel(
-                    guild, hospital.id, hospital.name
-                )
-                # 입원 기간(월)에 맞는 비공개 기간 스레드에 초대한다.
-                await self.bot.channel_service.ensure_community_access(
-                    guild, user_id
+                    guild, hospital.id, hospital.name, with_role=False
                 )
             except Exception:  # noqa: BLE001
-                logger.exception("병원 역할/채널 처리 실패: hospital=%s", hospital.id)
+                logger.exception("병원 채널 확보 실패: hospital=%s", hospital.id)
 
     async def _delete_proof(self, req) -> None:
         """심사 완료 후 증빙 메시지를 삭제한다 (개인정보 보호)."""

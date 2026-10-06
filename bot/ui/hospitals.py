@@ -62,8 +62,9 @@ class AddHospitalModal(discord.ui.Modal, title="병원 추가"):
         # 새 병원 전용 채널/역할을 확보한다 (실패해도 등록은 유지).
         if interaction.guild is not None:
             try:
+                # 역할은 사용자가 커뮤니티 패널에서 선택할 때만 만든다.
                 await self.bot.channel_service.ensure_hospital_channel(
-                    interaction.guild, hospital.id, hospital.name
+                    interaction.guild, hospital.id, hospital.name, with_role=False
                 )
             except Exception:  # noqa: BLE001 - 채널 생성 실패가 등록을 막지 않도록
                 logger.exception("병원 채널 확보 실패: hospital=%s", hospital.id)
@@ -226,8 +227,9 @@ class ManualProofModal(discord.ui.Modal, title="서류 심사 신청"):
                 except Exception:  # noqa: BLE001
                     logger.exception("1단계 역할 부여 실패: user=%s", interaction.user.id)
             try:
+                # 역할은 사용자가 커뮤니티 패널에서 선택할 때만 만든다.
                 await self.bot.channel_service.ensure_hospital_channel(
-                    interaction.guild, self.hospital_id, hospital_name
+                    interaction.guild, self.hospital_id, hospital_name, with_role=False
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("병원 채널 확보 실패: hospital=%s", self.hospital_id)

@@ -489,3 +489,26 @@ class HospitalRequest(Base):
         DateTime, server_default=func.now(), nullable=False
     )
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class HospitalOptIn(Base):
+    """사용자가 커뮤니티 패널에서 직접 '선택'한 병원 역할.
+
+    서버 역할(role)을 최소화하기 위해, 병원 역할은 사용자가 원할 때만
+    부여하고 선택 상태는 DB 에 저장한다.
+    """
+
+    __tablename__ = "hospital_optins"
+    __table_args__ = (
+        UniqueConstraint("user_id", "hospital_id", name="uq_hospital_optin"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    hospital_id: Mapped[int] = mapped_column(
+        ForeignKey("hospitals.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )

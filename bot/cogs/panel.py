@@ -307,8 +307,9 @@ class UnifiedVerifyModal(discord.ui.Modal, title="서류 인증"):
                 except Exception:  # noqa: BLE001
                     logger.exception("1단계 역할 부여 실패: user=%s", interaction.user.id)
             try:
+                # 역할은 사용자가 커뮤니티 패널에서 선택할 때만 만든다.
                 await self.bot.channel_service.ensure_hospital_channel(
-                    interaction.guild, hospital.id, hospital_name
+                    interaction.guild, hospital.id, hospital_name, with_role=False
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("병원 채널 확보 실패: hospital=%s", hospital.id)
@@ -413,8 +414,9 @@ class OtherVerifyModal(discord.ui.Modal, title="기타 방법 인증 신청"):
             try:
                 hospital = await self.bot.hospitals.get_by_name(hospital_name)
                 if hospital is not None:
+                    # 역할은 사용자가 커뮤니티 패널에서 선택할 때만 만든다.
                     await self.bot.channel_service.ensure_hospital_channel(
-                        interaction.guild, hospital.id, hospital.name
+                        interaction.guild, hospital.id, hospital.name, with_role=False
                     )
             except Exception:  # noqa: BLE001
                 logger.exception("병원 채널 확보 실패: hospital=%s", hospital_name)
@@ -603,8 +605,9 @@ class HospitalRequestReviewView(discord.ui.View):
         )
         if interaction.guild is not None:
             try:
+                # 역할은 사용자가 커뮤니티 패널에서 선택할 때만 만든다.
                 await self.bot.channel_service.ensure_hospital_channel(
-                    interaction.guild, hospital.id, hospital.name
+                    interaction.guild, hospital.id, hospital.name, with_role=False
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("병원 채널 확보 실패: hospital=%s", hospital.id)
@@ -1029,7 +1032,7 @@ class VerifyPanelView(discord.ui.View):
         await _proceed(interaction)
 
     @discord.ui.button(
-        label="서류 인증 (2단계)", style=discord.ButtonStyle.success,
+        label="서류 인증", style=discord.ButtonStyle.success,
         custom_id="mf:v_verify", row=0,
     )
     async def verify(
@@ -1359,12 +1362,180 @@ class MatchPanelView(discord.ui.View):
 # --------------------------------------------------------------------------- #
 # 커뮤니티 패널 (영구 뷰) — 💬-전체-커뮤니티 채널
 # --------------------------------------------------------------------------- #
+class HospitalRoleSelectView(discord.ui.View):
+    """사용자가 병원 역할을 직접 '선택'하는 드롭다운 (DB 저장 + 역할 부여)."""
+
+    def __init__(self, bot: MindFinderBot, hospitals: list) -> None:
+        super().__init__(timeout=180)
+        self.bot = bot
+        options = []
+        for hospital in hospitals[:25]:
+            label = hospital_display_name(hospital.name)
+            options.append(
+                discord.SelectOption(label=label[:100], value=str(hospital.id))
+            )
+        select: discord.ui.Select = discord.ui.Select(
+            placeholder="커뮤니티에 참여할 병원을 선택하세요",
+            min_values=0,
+            max_values=1,
+            options=options,
+        )
+        select.callback = self._on_select  # type: ignore[method-assign]
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "서버에서만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+        values = interaction.data.get("values", []) if interaction.data else []
+        if not values:
+            await interaction.response.send_message(
+                "선택이 취소되었습니다.", ephemeral=True
+            )
+            return
+        hospital_id = int(values[0])
+        hospital = await self.bot.hospitals.get_by_id(hospital_id)
+        if hospital is None:
+            await interaction.response.send_message(
+                "병원을 찾을 수 없습니다.", ephemeral=True
+            )
+            return
+        # 선택 저장(DB) + 역할/채널 확보 + 기간 스레드 초대
+        await self.bot.access.set_hospital_optin(interaction.user.id, hospital_id, True)
+        await self.bot.channel_service.ensure_optin_hospital(
+            interaction.guild, interaction.user.id, hospital_id, hospital.name
+        )
+        try:
+            await self.bot.channel_service.ensure_community_access(
+                interaction.guild, interaction.user.id
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("커뮤니티 접근 동기화 실패: user=%s", interaction.user.id)
+        await interaction.response.send_message(
+            f"✅ **{hospital_display_name(hospital.name)}** 커뮤니티에 참여했습니다. "
+            "이제 이 병원의 병원·기간 커뮤니티 채널이 보입니다.",
+            ephemeral=True,
+        )
+
+
+class HospitalRoleDeselectView(discord.ui.View):
+    """사용자가 선택한 병원 역할을 '해제'하는 드롭다운 (역할 회수)."""
+
+    def __init__(self, bot: MindFinderBot, hospitals: list) -> None:
+        super().__init__(timeout=180)
+        self.bot = bot
+        options = []
+        for hospital in hospitals[:25]:
+            label = hospital_display_name(hospital.name)
+            options.append(
+                discord.SelectOption(label=label[:100], value=str(hospital.id))
+            )
+        select: discord.ui.Select = discord.ui.Select(
+            placeholder="해제할 병원을 선택하세요",
+            min_values=0,
+            max_values=1,
+            options=options,
+        )
+        select.callback = self._on_select  # type: ignore[method-assign]
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "서버에서만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+        values = interaction.data.get("values", []) if interaction.data else []
+        if not values:
+            await interaction.response.send_message(
+                "선택이 취소되었습니다.", ephemeral=True
+            )
+            return
+        hospital_id = int(values[0])
+        hospital = await self.bot.hospitals.get_by_id(hospital_id)
+        if hospital is None:
+            await interaction.response.send_message(
+                "병원을 찾을 수 없습니다.", ephemeral=True
+            )
+            return
+        await self.bot.access.set_hospital_optin(
+            interaction.user.id, hospital_id, False
+        )
+        member = interaction.guild.get_member(interaction.user.id)
+        if member is not None:
+            await self.bot.access.revoke_hospital_role(
+                interaction.guild, member, hospital_id
+            )
+        await interaction.response.send_message(
+            f"⚪ **{hospital_display_name(hospital.name)}** 커뮤니티 참여를 해제했습니다.",
+            ephemeral=True,
+        )
+
+
 class CommunityPanelView(discord.ui.View):
-    """커뮤니티 안내 패널: 전체 커뮤니티 / 병원·기간 스레드."""
+    """커뮤니티 패널: 병원 역할 선택(opt-in) / 내 기간 스레드."""
 
     def __init__(self, bot: MindFinderBot) -> None:
         super().__init__(timeout=None)
         self.bot = bot
+
+    async def _verified_hospitals(self, user_id: int) -> list:
+        """사용자가 인증(2단계)받은 병원 객체 목록."""
+        verified_ids = set(await self.bot.access.verified_hospital_ids(user_id))
+        hospitals = []
+        for hospital in await self.bot.hospitals.list_all():
+            if hospital.id in verified_ids:
+                hospitals.append(hospital)
+        return hospitals
+
+    @discord.ui.button(
+        label="병원 역할 선택", style=discord.ButtonStyle.success,
+        custom_id="mf:c_select", row=0,
+    )
+    async def select_hospital(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """내가 인증받은 병원 중 참여할 병원 역할을 직접 선택한다."""
+        hospitals = await self._verified_hospitals(interaction.user.id)
+        if not hospitals:
+            await interaction.response.send_message(
+                "먼저 **서류 인증(2단계)** 을 완료해야 병원 커뮤니티 역할을 "
+                "선택할 수 있습니다.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "참여할 병원을 선택하세요. 선택한 병원의 역할이 부여되고 "
+            "**병원·기간 커뮤니티**가 열립니다.",
+            view=HospitalRoleSelectView(self.bot, hospitals),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="병원 역할 해제", style=discord.ButtonStyle.secondary,
+        custom_id="mf:c_deselect", row=0,
+    )
+    async def deselect_hospital(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """선택한 병원 역할을 해제한다."""
+        optedin = set(await self.bot.access.optedin_hospital_ids(interaction.user.id))
+        if not optedin:
+            await interaction.response.send_message(
+                "해제할 병원 역할이 없습니다.", ephemeral=True
+            )
+            return
+        hospitals = []
+        for hospital in await self.bot.hospitals.list_all():
+            if hospital.id in optedin:
+                hospitals.append(hospital)
+        await interaction.response.send_message(
+            "해제할 병원을 선택하세요.",
+            view=HospitalRoleDeselectView(self.bot, hospitals),
+            ephemeral=True,
+        )
 
     @discord.ui.button(
         label="내 기간 스레드", style=discord.ButtonStyle.primary,
@@ -1388,21 +1559,21 @@ class CommunityPanelView(discord.ui.View):
             logger.exception("커뮤니티 접근 동기화 실패: user=%s", interaction.user.id)
 
         admissions = await self.bot.admissions.list_by_user(interaction.user.id)
-        verified_ids = set(
-            await self.bot.access.verified_hospital_ids(interaction.user.id)
+        optedin_ids = set(
+            await self.bot.access.optedin_hospital_ids(interaction.user.id)
         )
         member = interaction.guild.get_member(interaction.user.id)
         embed = discord.Embed(
             title="🏥 내 병원·기간 커뮤니티",
             description=(
-                "서류 인증(2단계)을 마친 병원의, 내 입원 기간에 해당하는 "
-                "**비공개 월 스레드**만 표시됩니다."
+                "**‘병원 역할 선택’** 으로 참여를 선택한 병원의, "
+                "내 입원 기간에 해당하는 **비공개 월 스레드**만 표시됩니다."
             ),
             color=discord.Color.teal(),
         )
         found = False
         for adm in admissions:
-            if adm.hospital_id not in verified_ids:
+            if adm.hospital_id not in optedin_ids:
                 continue
             labels: list[str] = []
             for ym_value in self.bot.channel_service.months_for_admission(adm):
@@ -1429,8 +1600,8 @@ class CommunityPanelView(discord.ui.View):
             embed.add_field(
                 name="표시할 기간 스레드 없음",
                 value=(
-                    "‘서류 인증 (2단계)’를 완료한 병원의 이력이 있어야 "
-                    "병원·기간 커뮤니티가 열립니다."
+                    "**‘병원 역할 선택’** 버튼으로 참여할 병원을 먼저 선택하세요. "
+                    "(서류 인증을 완료한 병원만 선택할 수 있습니다.)"
                 ),
                 inline=False,
             )
@@ -1468,7 +1639,7 @@ class CommunityPanelView(discord.ui.View):
         self, interaction: discord.Interaction, _button: discord.ui.Button
     ) -> None:
         await interaction.response.send_message(
-            "🧩 매칭은 **서류 인증자(2단계)** 만 이용할 수 있습니다.\n"
+            "🧩 매칭은 **인증됨(서류·지식 인증)** 사용자만 이용할 수 있습니다.\n"
             "매칭 패널에서 '매칭 희망 켜기' → '동료 찾기' 로 신청하세요.\n"
             "연락처는 봇이 저장하지 않으며, 매칭 성사 시 비공개 채널에서 직접 대화합니다.",
             ephemeral=True,
@@ -1565,8 +1736,8 @@ class HelpPanelView(discord.ui.View):
         tier = await bot.access.user_tier(interaction.user.id)
         tier_label = {
             0: "미인증 — 먼저 입원 이력을 등록하세요",
-            1: "1단계 (자기 신고) — 전체 커뮤니티 이용 가능",
-            2: "2단계 (서류·지식 인증) — 병원 커뮤니티·매칭 이용 가능",
+            1: "임시인증 (자기 신고) — 전체 커뮤니티 이용 가능",
+            2: "인증됨 (서류·지식 인증) — 병원 커뮤니티·매칭 이용 가능",
         }.get(tier, f"{tier}단계")
         embed = discord.Embed(title="🧭 내 이용 현황", color=discord.Color.teal())
         embed.add_field(name="인증 단계", value=tier_label, inline=False)
@@ -1591,7 +1762,7 @@ class HelpPanelView(discord.ui.View):
         pref = await bot.match_prefs.is_enabled(interaction.user.id)
         can_match = await bot.access.can_match(interaction.user.id)
         match_lines = [f"희망: {'켜짐' if pref else '꺼짐'}"]
-        match_lines.append("사용 가능" if can_match else "2단계 인증 후 사용 가능")
+        match_lines.append("사용 가능" if can_match else "인증됨(2단계) 후 사용 가능")
         if interaction.guild is not None:
             try:
                 chans = await bot.matching_service.my_open_channels(
@@ -1760,7 +1931,7 @@ async def grant_verified_access(
             except discord.Forbidden:
                 logger.warning("인증 역할 부여 권한 없음: user=%s", user_id)
 
-    # 병원 역할 + 병원 채널 확보
+    # 병원 채널 확보 (역할은 사용자가 커뮤니티 패널에서 선택할 때만 부여)
     hospital_name = getattr(result, "hospital_name", None)
     if not hospital_name:
         return
@@ -1768,16 +1939,11 @@ async def grant_verified_access(
     if hospital is None:
         hospital = await VerificationService(bot).resolve_hospital(hospital_name)
     try:
-        await bot.access.grant_hospital_role(
-            guild, member, hospital.id, hospital.name
-        )
         await bot.channel_service.ensure_hospital_channel(
-            guild, hospital.id, hospital.name
+            guild, hospital.id, hospital.name, with_role=False
         )
-        # 입원 기간(월)에 맞는 비공개 기간 스레드에 초대한다.
-        await bot.channel_service.ensure_community_access(guild, user_id)
     except Exception:  # noqa: BLE001
-        logger.exception("병원 역할/채널 처리 실패: hospital=%s", hospital.id)
+        logger.exception("병원 채널 확보 실패: hospital=%s", hospital.id)
 
 
 # --------------------------------------------------------------------------- #
@@ -1832,6 +1998,11 @@ class PanelCog(commands.Cog):
                 await self.bot.channel_service.ensure_all(guild)
             except Exception:  # noqa: BLE001 - 한 서버 실패가 전체를 막지 않도록
                 logger.exception("채널 자동 구성 실패: guild=%s", guild.id)
+            # 기존 역할 이름을 새 이름(임시인증/인증됨/병원 인증됨)으로 정리
+            try:
+                await self.bot.channel_service.migrate_role_names(guild)
+            except Exception:  # noqa: BLE001
+                logger.exception("역할 이름 정리 실패: guild=%s", guild.id)
             # 2) 약관·개인정보 전문 게시 (전용 채널)
             try:
                 await self.bot.terms_service.post_all(guild)
@@ -1978,18 +2149,18 @@ class PanelCog(commands.Cog):
             color=discord.Color.green(),
         )
         embed.add_field(
-            name="① 입원 이력 등록 (자기 신고)",
-            value="병원·기간을 입력하면 1단계 인증 → **전체 커뮤니티** 이용",
+            name="① 입원 이력 등록 (자기 신고 → 임시인증)",
+            value="병원·기간을 입력하면 **임시인증** → **전체 커뮤니티** 이용",
             inline=False,
         )
         embed.add_field(
-            name="② 서류 인증 (2단계)",
+            name="② 서류 인증 (→ 인증됨)",
             value=(
                 "‘서류 인증’ 버튼 → **창(모달)에서 병원 선택** 후 진행\n"
                 "**서울대병원 계열** 사실확인서 PDF → 자동 진위확인\n"
                 "**그 외 병원** → 입원 기간 입력 후 관리자 수동 심사\n"
                 "목록에 없는 병원은 ‘기타 병원 직접 입력’으로 요청\n"
-                "2단계 인증 → **병원·기간 커뮤니티 + 매칭** 이용"
+                "**인증됨** → **병원·기간 커뮤니티 + 매칭** 이용"
             ),
             inline=False,
         )
@@ -2012,7 +2183,7 @@ class PanelCog(commands.Cog):
             title="🧩 매칭",
             description=(
                 "같은 병원·시기에 입원했던 동료와 연결됩니다. "
-                "(서류 인증자 전용)"
+                "(**인증됨** 사용자 전용)"
             ),
             color=discord.Color.blurple(),
         )
@@ -2032,8 +2203,9 @@ class PanelCog(commands.Cog):
         embed = discord.Embed(
             title="💬 전체 커뮤니티",
             description=(
-                "인증(1단계) 이상이면 이용할 수 있는 전체 커뮤니티입니다.\n"
-                "서류 인증을 받으면 **병원별·기간별** 채널도 열립니다."
+                "**임시인증**(자기 신고) 이상이면 이용할 수 있는 전체 커뮤니티입니다.\n"
+                "**인증됨**(서류·지식 인증)을 받은 뒤 **‘병원 역할 선택’** 으로 "
+                "참여할 병원을 고르면 **병원·기간 커뮤니티**가 열립니다."
             ),
             color=discord.Color.teal(),
         )
@@ -2053,9 +2225,9 @@ class PanelCog(commands.Cog):
             name="채널 안내",
             value=(
                 "🔐 **인증** — 이력 등록·서류 인증\n"
-                "🧩 **매칭** — 동료 찾기 (서류 인증자)\n"
-                "💬 **전체 커뮤니티** — 인증자 커뮤니티\n"
-                "🏥 **병원-커뮤니티** — 병원·기간별"
+                "🧩 **매칭** — 동료 찾기 (인증됨)\n"
+                "💬 **전체 커뮤니티** — 임시인증 이상\n"
+                "🏥 **병원-커뮤니티** — 병원 역할 선택 후 병원·기간별"
             ),
             inline=False,
         )

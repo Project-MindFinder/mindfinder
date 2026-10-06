@@ -67,8 +67,9 @@ class CommunityCog(commands.Cog):
         """내가 접근 가능한 기간 스레드 목록을 담은 임베드를 만든다."""
         guild = interaction.guild
         admissions = await self.bot.admissions.list_by_user(interaction.user.id)
-        verified_ids = set(
-            await self.bot.access.verified_hospital_ids(interaction.user.id)
+        # 사용자가 '선택'한 병원만 병원·기간 커뮤니티가 열린다.
+        optedin_ids = set(
+            await self.bot.access.optedin_hospital_ids(interaction.user.id)
         )
 
         embed = discord.Embed(
@@ -76,7 +77,7 @@ class CommunityCog(commands.Cog):
             description=(
                 "전체 커뮤니티는 1단계 인증이면 이용할 수 있고,\n"
                 "**병원·기간 커뮤니티**는 서류 인증(2단계) 후 "
-                "내 입원 기간에 해당하는 스레드만 보입니다."
+                "**‘병원 역할 선택’** 으로 참여를 선택한 병원에 한해 열립니다."
             ),
             color=discord.Color.teal(),
         )
@@ -105,7 +106,7 @@ class CommunityCog(commands.Cog):
         for adm in admissions:
             if hospital_name is not None and adm.hospital.name != hospital_name:
                 continue
-            if adm.hospital_id not in verified_ids:
+            if adm.hospital_id not in optedin_ids:
                 continue
             months = self.bot.channel_service.months_for_admission(adm)
             labels: list[str] = []
@@ -134,8 +135,8 @@ class CommunityCog(commands.Cog):
             embed.add_field(
                 name="표시할 기간 스레드 없음",
                 value=(
-                    "서류 인증(2단계)을 완료한 병원의 이력이 있어야 "
-                    "병원·기간 커뮤니티가 열립니다."
+                    "**‘병원 역할 선택’** 버튼으로 참여할 병원을 먼저 선택하세요. "
+                    "(서류 인증을 완료한 병원만 선택할 수 있습니다.)"
                 ),
                 inline=False,
             )

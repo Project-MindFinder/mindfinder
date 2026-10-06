@@ -19,6 +19,7 @@ from bot.db.models import (
     ConsentRecord,
     Hospital,
     HospitalAlias,
+    HospitalOptIn,
     HospitalRequest,
     KnowledgeVerification,
     ManagedChannel,
@@ -676,6 +677,20 @@ class ManagedRoleRepository:
             )
             return result.scalar_one_or_none()
 
+    async def list_for_guild(self, guild_id: int) -> Sequence[ManagedRole]:
+        """길드의 모든 관리 역할 매핑 (이름 변경 마이그레이션용)."""
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(ManagedRole).where(ManagedRole.guild_id == guild_id)
+            )
+            return result.scalars().all()
+
+    async def list_all(self) -> Sequence[ManagedRole]:
+        """모든 길드의 관리 역할 매핑."""
+        async with self.db.session() as session:
+            result = await session.execute(select(ManagedRole))
+            return result.scalars().all()
+
     async def upsert(
         self, guild_id: int, key: str, discord_id: int, name: str
     ) -> None:
@@ -984,3 +999,65 @@ class HospitalRequestRepository:
                 )
             )
             await session.commit()
+
+
+class HospitalOptInRepository:
+    """hospital_optins 테이블 접근 (사용자가 선택한 병원 역할)."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def set_optin(
+        self, user_id: int, hospital_id: int, enabled: bool
+    ) -> None:
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(HospitalOptIn).where(
+                    HospitalOptIn.user_id == user_id,
+                    HospitalOptIn.hospital_id == hospital_id,
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                session.add(
+                    HospitalOptIn(
+                        user_id=user_id,
+                        hospital_id=hospital_id,
+                        enabled=enabled,
+                    )
+                )
+            else:
+                row.enabled = enabled
+            await session.commit()
+
+    async def is_opted_in(self, user_id: int, hospital_id: int) -> bool:
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(HospitalOptIn).where(
+                    HospitalOptIn.user_id == user_id,
+                    HospitalOptIn.hospital_id == hospital_id,
+                    HospitalOptIn.enabled.is_(True),
+                )
+            )
+            return result.scalar_one_or_none() is not None
+
+    async def list_for_user(self, user_id: int) -> Sequence[int]:
+        """사용자가 선택한(enabled) 병원 id 목록."""
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(HospitalOptIn.hospital_id).where(
+                    HospitalOptIn.user_id == user_id,
+                    HospitalOptIn.enabled.is_(True),
+                )
+            )
+            return [row[0] for row in result.all()]
+
+    async def list_all_enabled(self) -> Sequence[int]:
+        """어떤 사용자든 선택한(enabled) 병원 id 집합 (중복 제거)."""
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(HospitalOptIn.hospital_id)
+                .where(HospitalOptIn.enabled.is_(True))
+                .distinct()
+            )
+            return [row[0] for row in result.all()]

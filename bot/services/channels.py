@@ -25,6 +25,11 @@ from typing import TYPE_CHECKING, Optional, Sequence
 
 import discord
 
+from bot.services.access_control import (
+    TIER1_ROLE_NAME,
+    TIER2_ROLE_NAME,
+    AccessControlService,
+)
 from bot.utils.periods import current_ym, format_ym
 
 if TYPE_CHECKING:  # 순환 임포트 방지를 위해 타입 검사 시에만 임포트한다.
@@ -91,22 +96,26 @@ class ChannelService:
         public: bool = False,
         view_roles: Sequence[Optional[discord.Role]] = (),
         deny_roles: Sequence[Optional[discord.Role]] = (),
+        readonly: bool = False,
     ) -> dict:
         """채널 권한 오버라이트를 만든다.
 
         public=True 면 @everyone 이 볼 수 있다. 그 외에는 @everyone 을 차단하고
         view_roles 에게만 열어준다. deny_roles 는 명시적으로 차단한다.
+        readonly=True 면 보기만 허용하고 **채팅(전송)은 막는다** (패널/안내 채널).
         """
         ow: dict = {
             guild.default_role: discord.PermissionOverwrite(
-                view_channel=public, send_messages=public, read_message_history=public
+                view_channel=public,
+                send_messages=public and not readonly,
+                read_message_history=public,
             )
         }
         for role in view_roles:
             if role is not None:
                 ow[role] = discord.PermissionOverwrite(
                     view_channel=True,
-                    send_messages=True,
+                    send_messages=not readonly,
                     read_message_history=True,
                 )
         for role in deny_roles:
@@ -116,6 +125,17 @@ class ChannelService:
         if admin is not None:
             ow[admin] = discord.PermissionOverwrite(
                 view_channel=True, send_messages=True, read_message_history=True
+            )
+        # 봇 자신은 항상 전송 가능해야 한다 (readonly 채널에 패널 게시).
+        me = getattr(guild, "me", None)
+        if me is not None:
+            ow[me] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                manage_messages=True,
+                embed_links=True,
+                attach_files=True,
             )
         return ow
 
@@ -211,20 +231,31 @@ class ChannelService:
         return _clip(f"🏥-{hospital_name}")
 
     async def ensure_hospital_channel(
-        self, guild: discord.Guild, hospital_id: int, hospital_name: str
+        self,
+        guild: discord.Guild,
+        hospital_id: int,
+        hospital_name: str,
+        *,
+        with_role: bool = True,
     ) -> Optional[discord.TextChannel]:
-        """병원 전용 채널을 확보한다 (해당 병원 인증자 역할만 접근)."""
+        """병원 전용 채널을 확보한다.
+
+        ``with_role=False`` 이면 **역할을 만들지 않고** 채널만 만든다.
+        (병원 역할은 사용자가 커뮤니티 패널에서 직접 선택했을 때만 생성)
+        """
         category = await self._ensure_category(
             guild, HOSPITAL_CATEGORY_KEY, HOSPITAL_CATEGORY_NAME
         )
-        hospital_role = await self.bot.access.hospital_role(
-            guild, hospital_id, hospital_name
-        )
+        hospital_role = None
+        if with_role:
+            hospital_role = await self.bot.access.hospital_role(
+                guild, hospital_id, hospital_name
+            )
         tier2_role = await self.bot.access.tier_role(guild, 2)
         overwrites = self._overwrites(
             guild,
             public=False,
-            view_roles=[hospital_role, tier2_role],
+            view_roles=[hospital_role],
             deny_roles=[],
         )
         # tier2 라도 해당 병원 역할이 없으면 못 보도록 명시적으로 차단
@@ -241,6 +272,24 @@ class ChannelService:
             category,
             overwrites,
         )
+
+    async def ensure_optin_hospital(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        hospital_id: int,
+        hospital_name: str,
+    ) -> Optional[discord.TextChannel]:
+        """사용자가 특정 병원 역할을 '선택'했을 때 채널/역할을 확보하고 부여한다."""
+        channel = await self.ensure_hospital_channel(
+            guild, hospital_id, hospital_name, with_role=True
+        )
+        member = guild.get_member(user_id)
+        if member is not None:
+            await self.bot.access.grant_hospital_role(
+                guild, member, hospital_id, hospital_name
+            )
+        return channel
 
     # ---------- 기간 스레드 ----------
 
@@ -340,9 +389,10 @@ class ChannelService:
         admissions = await self.bot.admissions.list_by_user(user_id)
         if not admissions:
             return
-        verified_ids = set(await self.bot.access.verified_hospital_ids(user_id))
+        # 사용자가 커뮤니티 패널에서 '선택'한 병원만 기간 스레드를 연다.
+        optin_ids = set(await self.bot.access.optedin_hospital_ids(user_id))
         for adm in admissions:
-            if adm.hospital_id not in verified_ids:
+            if adm.hospital_id not in optin_ids:
                 continue
             for ym_value in self.months_for_admission(adm):
                 thread = await self.ensure_period_thread(
@@ -366,7 +416,8 @@ class ChannelService:
         verify_cat = await self._ensure_category(
             guild, VERIFY_CATEGORY_KEY, VERIFY_CATEGORY_NAME
         )
-        public_ow = self._overwrites(guild, public=True)
+        # 인증/패널 채널은 봇 안내 전용 → 사용자 채팅 차단(readonly)
+        public_ow = self._overwrites(guild, public=True, readonly=True)
         await self._ensure_text(
             guild, VERIFY_CHANNEL_KEY, VERIFY_CHANNEL_NAME, verify_cat, public_ow
         )
@@ -389,26 +440,15 @@ class ChannelService:
             community_ow,
         )
         notice_ow = self._overwrites(
-            guild, public=False, view_roles=[tier1_role, tier2_role]
+            guild, public=False, view_roles=[tier1_role, tier2_role], readonly=True
         )
-        # 공지는 읽기 전용에 가깝게 (일반 사용자 전송 제한)
-        for role in (tier1_role, tier2_role):
-            if role is not None:
-                notice_ow[role] = discord.PermissionOverwrite(
-                    view_channel=True, send_messages=False, read_message_history=True
-                )
         await self._ensure_text(
             guild, NOTICE_CHANNEL_KEY, NOTICE_CHANNEL_NAME, community_cat, notice_ow
         )
         # 약관·개인정보 전문 게시 채널 (1단계 이상 열람, 관리자만 작성)
         terms_ow = self._overwrites(
-            guild, public=False, view_roles=[tier1_role, tier2_role]
+            guild, public=False, view_roles=[tier1_role, tier2_role], readonly=True
         )
-        for role in (tier1_role, tier2_role):
-            if role is not None:
-                terms_ow[role] = discord.PermissionOverwrite(
-                    view_channel=True, send_messages=False, read_message_history=True
-                )
         await self._ensure_text(
             guild, TERMS_CHANNEL_KEY, TERMS_CHANNEL_NAME, community_cat, terms_ow
         )
@@ -417,7 +457,10 @@ class ChannelService:
         match_cat = await self._ensure_category(
             guild, MATCH_CATEGORY_KEY, MATCH_CATEGORY_NAME
         )
-        match_ow = self._overwrites(guild, public=False, view_roles=[tier2_role])
+        # 매칭 채널도 안내 패널 전용 → 채팅 차단
+        match_ow = self._overwrites(
+            guild, public=False, view_roles=[tier2_role], readonly=True
+        )
         await self._ensure_text(
             guild, MATCH_CHANNEL_KEY, MATCH_CHANNEL_NAME, match_cat, match_ow
         )
@@ -432,9 +475,59 @@ class ChannelService:
         )
 
         # 5) 병원별 채널
-        if settings.per_hospital_channels:
-            for hospital in await self.bot.hospitals.list_all():
-                await self.ensure_hospital_channel(guild, hospital.id, hospital.name)
+        #    역할(role)은 사용자가 커뮤니티 패널에서 '선택'했을 때만 만든다.
+        #    - 역할을 이미 선택(opt-in)한 사용자의 병원 → 채널 + 역할 확보
+        #    - 그 외 등록된 병원 → 역할 없이 채널만 확보
+        optin_hospital_ids = await self._optin_hospital_ids()
+        for hospital in await self.bot.hospitals.list_all():
+            with_role = hospital.id in optin_hospital_ids
+            await self.ensure_hospital_channel(
+                guild, hospital.id, hospital.name, with_role=with_role
+            )
+
+    async def _optin_hospital_ids(self) -> set[int]:
+        """어떤 사용자든 역할을 선택한 병원 id 집합 (역할 생성 대상)."""
+        repo = getattr(self.bot, "hospital_optins", None)
+        if repo is None:
+            return set()
+        try:
+            return set(await repo.list_all_enabled())
+        except Exception:  # noqa: BLE001
+            logger.exception("병원 opt-in 조회 실패")
+            return set()
+
+    async def migrate_role_names(self, guild: discord.Guild) -> None:
+        """기존에 생성된 역할을 새 이름(임시인증/인증됨/병원 인증됨)으로 바꾼다."""
+        records = await self.bot.managed_roles.list_for_guild(guild.id)
+        for record in records:
+            role = guild.get_role(record.discord_id)
+            if role is None:
+                continue
+            if record.key == "tier1":
+                target = TIER1_ROLE_NAME
+            elif record.key == "tier2":
+                target = TIER2_ROLE_NAME
+            elif record.key.startswith("hospital:"):
+                try:
+                    hospital_id = int(record.key.split(":", 1)[1])
+                except (IndexError, ValueError):
+                    continue
+                hospital = await self.bot.hospitals.get_by_id(hospital_id)
+                if hospital is None:
+                    continue
+                target = AccessControlService.hospital_role_name(hospital.name)
+            else:
+                continue
+            if role.name == target:
+                continue
+            try:
+                await role.edit(name=target, reason="MindFinder 역할 이름 정리")
+                await self.bot.managed_roles.upsert(
+                    guild.id, record.key, role.id, target
+                )
+                logger.info("역할 이름 변경: %s → %s", role.name, target)
+            except (discord.Forbidden, discord.HTTPException):
+                logger.exception("역할 이름 변경 실패: role=%s", role.id)
 
     async def managed_text_channel(
         self, guild: discord.Guild, key: str
