@@ -145,14 +145,13 @@ class AdmissionModal(discord.ui.Modal, title="입원 이력 등록"):
 # 모달: 통합 서류 인증 (병원 선택 + 기간 입력 + PDF 업로드)
 # --------------------------------------------------------------------------- #
 class UnifiedVerifyModal(discord.ui.Modal, title="서류 인증"):
-    """선택한 병원의 입원 기간을 입력받아 인증을 진행한다.
+    """선택한 병원의 입원 기간과 서류(PDF)를 **창에서** 입력받아 인증한다.
 
-    · 서울대병원 계열 → 인증 채널에 PDF 업로드 안내 (자동 진위확인)
+    · 서울대병원 계열 → 창에서 올린 PDF 를 자동 진위확인
     · 그 외 병원 → 기간을 입력해 관리자 수동 심사 요청
 
-    디스코드 모달에는 Select/FileUpload 를 넣을 수 없으므로,
     병원은 앞 단계의 드롭다운(HospitalPickView)에서 고르고,
-    PDF 는 **인증 채널에 업로드**하면 on_message 리스너가 자동 진위확인한다.
+    PDF 는 이 창(모달) 안에서 **업로드**한다. (Select 가 없어 FileUpload 허용)
     """
 
     기간 = discord.ui.TextInput(
@@ -172,6 +171,17 @@ class UnifiedVerifyModal(discord.ui.Modal, title="서류 인증"):
         self.bot = bot
         self.service = service
         self.hospital_id = hospital_id
+        # PDF 업로드 (서울대병원 계열은 필수, 그 외는 비워둠)
+        self.서류 = discord.ui.FileUpload(
+            custom_id="mf:verify:pdf", required=False, max_values=1
+        )
+        self.add_item(
+            discord.ui.Label(
+                text="입퇴원 사실확인서 PDF (서울대병원 계열)",
+                description="서울대병원 계열은 PDF 필수 · 그 외 병원은 비워두세요.",
+                component=self.서류,
+            )
+        )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         hospital = await self.bot.hospitals.get_by_id(self.hospital_id)
@@ -181,27 +191,25 @@ class UnifiedVerifyModal(discord.ui.Modal, title="서류 인증"):
             )
             return
 
+        attachments = list(getattr(self.서류, "values", []) or [])
+        attachment = attachments[0] if attachments else None
+        if attachment is not None and not attachment.filename.lower().endswith(".pdf"):
+            await interaction.response.send_message(
+                "⚠️ PDF 파일만 제출할 수 있습니다.", ephemeral=True
+            )
+            return
+
         if self.service.supports_auto_verify(hospital.name):
-            await self._prompt_pdf_upload(interaction, hospital)
+            if attachment is None:
+                await interaction.response.send_message(
+                    f"📄 **{hospital_display_name(hospital.name)}** 은(는) "
+                    "입퇴원 사실확인서 **PDF** 를 창에서 업로드해야 합니다.",
+                    ephemeral=True,
+                )
+                return
+            await self._submit_auto(interaction, hospital, attachment)
             return
         await self._submit_manual(interaction, hospital)
-
-    async def _prompt_pdf_upload(self, interaction: discord.Interaction, hospital) -> None:
-        """서울대병원 계열: 인증 채널에 PDF 업로드를 안내한다 (자동 진위확인)."""
-        where = "🔐 인증 채널"
-        if interaction.guild is not None:
-            channel = await self.bot.channel_service.managed_text_channel(
-                interaction.guild, VERIFY_CHANNEL_KEY
-            )
-            if channel is not None:
-                where = channel.mention
-        await interaction.response.send_message(
-            f"📄 **{hospital_display_name(hospital.name)}** 은(는) "
-            "입퇴원 사실확인서 **PDF** 자동 진위확인이 필요합니다.\n"
-            f"{where} 에 **PDF 파일을 업로드**해 주세요. "
-            "업로드하면 자동으로 진위확인되어 인증이 처리됩니다.",
-            ephemeral=True,
-        )
 
     async def _submit_auto(
         self,

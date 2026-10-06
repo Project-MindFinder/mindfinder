@@ -173,7 +173,7 @@ async def test_register_admission_creates_and_resolves_hospital(
 ) -> None:
     admission_id, period, hospital_name = await vservice.register_admission(
         user_id=1,
-        hospital_name="서울대병원",  # 별칭 → 대표 병원으로 정규화
+        hospital_name="서울대어린이병원",  # 별칭 → 대표 병원으로 정규화
         start_year=2020,
         start_month=3,
         end_year=2020,
@@ -182,13 +182,13 @@ async def test_register_admission_creates_and_resolves_hospital(
     )
     assert admission_id > 0
     assert period.text() == "2020년 3월 ~ 2020년 5월"
-    assert hospital_name == "서울대학교병원"
+    assert hospital_name == "서울대학교어린이병원"
 
     rows = await bot.admissions.list_by_user(1)
     assert len(rows) == 1
     assert rows[0].verification == "self_reported"
     # 관계 즉시 로딩 확인 (세션 종료 후에도 접근 가능해야 함)
-    assert rows[0].hospital.name == "서울대학교병원"
+    assert rows[0].hospital.name == "서울대학교어린이병원"
 
 
 async def test_register_admission_invalid_period_raises(

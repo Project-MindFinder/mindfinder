@@ -124,6 +124,17 @@ class HospitalRepository:
                 session.add(HospitalAlias(hospital_id=hospital_id, alias=alias))
                 await session.commit()
 
+    async def delete(self, hospital_id: int) -> None:
+        """병원을 삭제한다 (별칭 포함)."""
+        async with self.db.session() as session:
+            await session.execute(
+                delete(HospitalAlias).where(HospitalAlias.hospital_id == hospital_id)
+            )
+            hospital = await session.get(Hospital, hospital_id)
+            if hospital is not None:
+                await session.delete(hospital)
+            await session.commit()
+
 
 class AdmissionRepository:
     """admissions 테이블 접근."""
@@ -168,6 +179,16 @@ class AdmissionRepository:
                 .order_by(Admission.admit_ym.desc())
             )
             return result.scalars().all()
+
+    async def count_by_hospital(self, hospital_id: int) -> int:
+        """특정 병원에 등록된 입원 이력 수."""
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(func.count())
+                .select_from(Admission)
+                .where(Admission.hospital_id == hospital_id)
+            )
+            return int(result.scalar_one())
 
     async def get_by_id(self, admission_id: int) -> Optional[Admission]:
         async with self.db.session() as session:
