@@ -140,7 +140,13 @@ class Admission(Base):
 
 
 class VerificationRequest(Base):
-    """서류 심사 요청."""
+    """서류 심사 요청.
+
+    - 수동 심사: 사용자가 서류를 제출하면 관리자가 승인/거절.
+    - 자동 검증: 병원 진위확인 API(예: 서울대병원)로 문서 진위·정신과 여부를
+      확인해 자동 승인한다. 이때 auto_verified=True 로 표시하고 진위확인
+      결과(문서번호, 상태, 메시지)를 함께 저장한다.
+    """
 
     __tablename__ = "verification_requests"
     __table_args__ = (
@@ -161,6 +167,27 @@ class VerificationRequest(Base):
     proof_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     reviewer_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # --- 자동 진위확인 (병원 진위확인 API) ---
+    # 관리자 수동 승인 없이 자동 승인되었는지 여부
+    auto_verified: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    # 진위확인에 사용한 문서확인번호 (중복 검증 방지용, 유니크)
+    document_no: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, unique=True, index=True
+    )
+    # 정신건강의학과 입원으로 확인되었는지 여부
+    is_psychiatric: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    # 진위확인 상태 (valid | invalid | unknown)
+    truth_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # 진위확인 응답 메시지 (사이트 alert 문구)
+    truth_message: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    # 파싱한 진료과 요약 (예: '소아정신과, 소아응급실')
+    department_summary: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
     )

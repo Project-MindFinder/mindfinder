@@ -255,6 +255,56 @@ class VerificationRepository:
             await session.refresh(request)
             return request.id
 
+    async def find_by_document_no(
+        self, document_no: str
+    ) -> Optional[VerificationRequest]:
+        """문서확인번호로 기존 검증 요청을 찾는다 (중복 검증 방지)."""
+        if not document_no:
+            return None
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(VerificationRequest).where(
+                    VerificationRequest.document_no == document_no
+                )
+            )
+            return result.scalar_one_or_none()
+
+    async def create_auto_verified(
+        self,
+        user_id: int,
+        admission_id: Optional[int],
+        *,
+        document_no: str,
+        is_psychiatric: bool,
+        truth_status: str,
+        truth_message: Optional[str],
+        department_summary: Optional[str],
+        approved: bool,
+        note: Optional[str] = None,
+    ) -> int:
+        """진위확인 결과를 담은 검증 요청을 생성한다.
+
+        관리자 수동 심사 없이 자동 판정 결과를 그대로 저장한다.
+        """
+        async with self.db.session() as session:
+            request = VerificationRequest(
+                user_id=user_id,
+                admission_id=admission_id,
+                status="approved" if approved else "rejected",
+                auto_verified=True,
+                document_no=document_no,
+                is_psychiatric=is_psychiatric,
+                truth_status=truth_status,
+                truth_message=truth_message,
+                department_summary=department_summary,
+                note=note,
+                reviewed_at=_utcnow(),
+            )
+            session.add(request)
+            await session.commit()
+            await session.refresh(request)
+            return request.id
+
     async def set_proof_message(
         self, request_id: int, channel_id: int, message_id: int
     ) -> None:
