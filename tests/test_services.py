@@ -29,7 +29,11 @@ from bot.db.repositories import (
 from bot.services.access_control import AccessControlService
 from bot.services.matching import MatchingService
 from bot.services.verification import VerificationService
-from bot.utils.certificate import CertificateParseError, ParsedCertificate
+from bot.utils.certificate import (
+    AdmissionEntry,
+    CertificateParseError,
+    ParsedCertificate,
+)
 from bot.utils.periods import PeriodError
 from bot.utils.snuh_truth import TruthResult, TruthStatus
 
@@ -270,6 +274,50 @@ async def test_auto_verify_missing_document_no(vservice: VerificationService) ->
         result = await vservice.auto_verify_pdf(1, "cert.pdf", b"%PDF-1.4")
     assert result.approved is False
     assert result.title == "문서번호 없음"
+
+
+async def test_auto_verify_creates_multiple_admissions(
+    vservice: VerificationService, bot: FakeBot
+) -> None:
+    """문서에 여러 건의 입원 이력이 있으면 모두 등록한다."""
+    cert = _fake_cert()
+    cert.admissions = [
+        AdmissionEntry(
+            admit_year=2020,
+            admit_month=3,
+            discharge_year=2020,
+            discharge_month=5,
+            department="정신건강의학과",
+        ),
+        AdmissionEntry(
+            admit_year=2021,
+            admit_month=1,
+            discharge_year=2021,
+            discharge_month=2,
+            department="정신건강의학과",
+        ),
+    ]
+    truth = TruthResult(
+        status=TruthStatus.VALID, message="정상 발급 문서", document_no="DOC-123"
+    )
+    fake_client = MagicMock()
+    fake_client.verify = AsyncMock(return_value=truth)
+
+    with patch(
+        "bot.services.verification.certificate_utils.parse_certificate",
+        return_value=cert,
+    ), patch(
+        "bot.services.verification.SnuhTruthClient", return_value=fake_client
+    ):
+        result = await vservice.auto_verify_pdf(1, "cert.pdf", b"%PDF-1.4")
+
+    assert result.approved is True
+    rows = await bot.admissions.list_by_user(1)
+    assert len(rows) == 2
+    # 대표(가장 이른) 이력만 검증 완료로 표시된다.
+    verified = [r for r in rows if r.verification == "verified"]
+    assert len(verified) == 1
+    assert (verified[0].admit_year, verified[0].admit_month) == (2020, 3)
 
 
 async def test_auto_verify_approved_creates_verified_admission(

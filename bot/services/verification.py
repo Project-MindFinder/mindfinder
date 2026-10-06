@@ -283,14 +283,27 @@ class VerificationService:
             )
 
         # 7) 입퇴원 기간 확인 → 입원 이력 생성
-        period = cert.period()
-        if period is None:
-            return AutoVerifyResult(
-                approved=False,
-                title="기간 확인 불가",
-                color="orange",
-                detail="서류에서 입퇴원 기간을 확인할 수 없습니다.",
-            )
+        #    문서에 여러 건의 입원 이력이 있으면 모두 등록한다 (다중 이력).
+        entries = list(cert.admissions)
+        if not entries:
+            # 입원 기간 행을 복원하지 못하면 대표 기간을 단일 이력으로 사용한다.
+            period = cert.period()
+            if period is None:
+                return AutoVerifyResult(
+                    approved=False,
+                    title="기간 확인 불가",
+                    color="orange",
+                    detail="서류에서 입퇴원 기간을 확인할 수 없습니다.",
+                )
+            entries = [
+                certificate_utils.AdmissionEntry(
+                    admit_year=period[0],
+                    admit_month=period[1],
+                    discharge_year=period[2],
+                    discharge_month=period[3],
+                )
+            ]
+        period = entries[0].period()
         start_year, start_month, end_year, end_month = period
 
         # 사용자가 선택한 병원(hospital_id)이 있으면 그 병원을 우선한다.
@@ -308,15 +321,28 @@ class VerificationService:
         await self.bot.user_repo.ensure_user(user_id)
         if admission_id is None:
             # 사용자가 이력을 미리 만들지 않아도 문서에서 기간을 추출해 생성한다.
-            admission_id = await self.bot.admissions.add(
-                user_id=user_id,
-                hospital_id=hospital.id,
-                admit_year=start_year,
-                admit_month=start_month,
-                discharge_year=end_year,
-                discharge_month=end_month,
-                is_ongoing=False,
-            )
+            # 여러 건이면 각각 별도 이력으로 등록하고, 대표(첫 번째)를 사용한다.
+            admission_ids: list[int] = []
+            for entry in entries:
+                new_id = await self.bot.admissions.add(
+                    user_id=user_id,
+                    hospital_id=hospital.id,
+                    admit_year=entry.admit_year,
+                    admit_month=entry.admit_month,
+                    discharge_year=entry.discharge_year,
+                    discharge_month=entry.discharge_month,
+                    is_ongoing=False,
+                )
+                admission_ids.append(new_id)
+            admission_id = admission_ids[0]
+            if len(admission_ids) > 1:
+                logger.info(
+                    "다중 입원 이력 등록: user=%s hospital=%s 건수=%d ids=%s",
+                    user_id,
+                    hospital.name,
+                    len(admission_ids),
+                    admission_ids,
+                )
 
         # 8) 서울대병원 진위확인 API 호출
         client = SnuhTruthClient(
