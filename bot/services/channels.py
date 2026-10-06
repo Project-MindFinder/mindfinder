@@ -416,13 +416,15 @@ class ChannelService:
         verify_cat = await self._ensure_category(
             guild, VERIFY_CATEGORY_KEY, VERIFY_CATEGORY_NAME
         )
-        # 인증/패널 채널은 봇 안내 전용 → 사용자 채팅 차단(readonly)
-        public_ow = self._overwrites(guild, public=True, readonly=True)
+        # 인증 채널: 서류(PDF) 업로드가 가능해야 하므로 일반 전송 허용
+        public_ow = self._overwrites(guild, public=True)
         await self._ensure_text(
             guild, VERIFY_CHANNEL_KEY, VERIFY_CHANNEL_NAME, verify_cat, public_ow
         )
+        # 패널(안내) 채널: 봇 안내 전용 → 사용자 채팅 차단(readonly)
+        panel_ow = self._overwrites(guild, public=True, readonly=True)
         await self._ensure_text(
-            guild, PANEL_CHANNEL_KEY, PANEL_CHANNEL_NAME, verify_cat, public_ow
+            guild, PANEL_CHANNEL_KEY, PANEL_CHANNEL_NAME, verify_cat, panel_ow
         )
 
         # 2) 커뮤니티 카테고리 (1단계 이상)
