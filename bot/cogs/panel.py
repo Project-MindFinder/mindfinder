@@ -3206,11 +3206,16 @@ class PanelCog(commands.Cog):
     def _items_signature(items) -> str:  # noqa: ANN001
         """뷰 구성요소(버튼/셀렉트)를 비교 가능한 문자열로 만든다.
 
-        주의: **기존 메시지의 컴포넌트**(디스코드 API 응답)와 **뷰 children**
+        주의 1: **기존 메시지의 컴포넌트**(디스코드 API 응답)와 **뷰 children**
         (로컬 객체)은 서로 다른 타입이라, 양쪽에 공통으로 안정적으로 존재하는
         값(custom_id / label)만 쓴다.
         (placeholder/options/style/disabled 는 API 응답 표현이 달라
          변경이 없어도 '변경됨'으로 오판할 수 있으므로 제외한다.)
+
+        주의 2: **순서를 비교하지 않는다.** 디스코드 API 는 컴포넌트를 row 순으로
+        묶어 반환하지만, 로컬 `view.children` 은 코드에 정의한 순서를 그대로
+        유지한다. 두 순서가 다르면(예: row0/row1/row1/row0... 로 정의) 내용이
+        같아도 '변경됨'으로 오판해 재시작마다 재게시된다. 따라서 정렬해 비교한다.
         """
         parts: list[str] = []
         for item in items:
@@ -3222,6 +3227,8 @@ class PanelCog(commands.Cog):
                     ]
                 )
             )
+        # 정의 순서(row 배치)가 아니라 '구성 자체'의 변경만 감지한다.
+        parts.sort()
         return "\x1e".join(parts)
 
     @staticmethod
