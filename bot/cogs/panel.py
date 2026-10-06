@@ -2944,9 +2944,11 @@ class PanelCog(commands.Cog):
         봇이 패널을 고정/삭제할 때 디스코드가 자동으로 남기는
         '...님이 이 채널에 메시지를 고정하셨어요' 류의 안내 메시지를 지운다.
         """
+        # discord.py 버전에 따라 '고정 해제' 타입이 없을 수 있으므로 존재하는 것만 쓴다.
         pin_types = {
-            discord.MessageType.pins_add,
-            discord.MessageType.pins_remove,
+            getattr(discord.MessageType, name)
+            for name in ("pins_add", "pins_remove")
+            if hasattr(discord.MessageType, name)
         }
         try:
             async for msg in channel.history(limit=limit):
