@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
+import sqlalchemy
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -56,26 +57,41 @@ class Database:
         logger.info("데이터베이스 연결 완료: %s", self.path)
 
     async def _run_light_migrations(self, conn) -> None:  # noqa: ANN001
-        """기존 DB 파일에 누락된 컬럼을 추가한다 (create_all 은 기존 테이블을 바꾸지 않음)."""
-        migrations: list[tuple[str, str, str]] = [
-            # (테이블, 컬럼, DDL)
-            (
-                "verification_requests",
-                "method",
-                "ALTER TABLE verification_requests "
-                "ADD COLUMN method VARCHAR(20) NOT NULL DEFAULT 'document'",
-            ),
-        ]
-        for table, column, ddl in migrations:
-            result = await conn.exec_driver_sql(f"PRAGMA table_info({table})")
-            columns = {row[1] for row in result.fetchall()}
-            if column in columns:
+        """기존 DB 파일에 누락된 컬럼을 자동으로 추가한다.
+
+        ``create_all`` 은 이미 존재하는 테이블을 변경하지 않으므로,
+        모델에 새 컬럼이 생기면 여기서 ALTER TABLE 로 보강한다.
+        """
+        existing_tables = set(
+            await conn.run_sync(
+                lambda sync_conn: sqlalchemy.inspect(sync_conn).get_table_names()
+            )
+        )
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing_tables:
                 continue
-            try:
-                await conn.exec_driver_sql(ddl)
-                logger.info("DB 마이그레이션: %s.%s 컬럼 추가", table, column)
-            except Exception:  # noqa: BLE001
-                logger.exception("DB 마이그레이션 실패: %s.%s", table, column)
+            rows = await conn.exec_driver_sql(f"PRAGMA table_info({table.name})")
+            existing_cols = {row[1] for row in rows.fetchall()}
+            for column in table.columns:
+                if column.name in existing_cols:
+                    continue
+                try:
+                    col_type = column.type.compile(dialect=conn.dialect)
+                except Exception:  # noqa: BLE001
+                    col_type = "TEXT"
+                ddl = (
+                    f"ALTER TABLE {table.name} "
+                    f"ADD COLUMN {column.name} {col_type}"
+                )
+                try:
+                    await conn.exec_driver_sql(ddl)
+                    logger.info(
+                        "DB 마이그레이션: %s.%s 컬럼 추가", table.name, column.name
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "DB 마이그레이션 실패: %s.%s", table.name, column.name
+                    )
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
