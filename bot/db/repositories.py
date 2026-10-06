@@ -286,6 +286,38 @@ class VerificationRepository:
             await session.refresh(request)
             return request.id
 
+    async def create_pending_manual(
+        self,
+        user_id: int,
+        *,
+        hospital_name: Optional[str] = None,
+        ward: Optional[str] = None,
+        method: str = "document",
+    ) -> int:
+        """자료만 제출한 수동 심사 요청을 생성한다 (관리자가 병원/기간 확정)."""
+        async with self.db.session() as session:
+            request = VerificationRequest(
+                user_id=user_id,
+                admission_id=None,
+                method=method,
+                pending_hospital_name=hospital_name,
+                pending_ward=ward,
+            )
+            session.add(request)
+            await session.commit()
+            await session.refresh(request)
+            return request.id
+
+    async def set_admission(self, request_id: int, admission_id: int) -> None:
+        """수동 심사 승인 시 생성된 이력을 요청에 연결한다."""
+        async with self.db.session() as session:
+            await session.execute(
+                update(VerificationRequest)
+                .where(VerificationRequest.id == request_id)
+                .values(admission_id=admission_id)
+            )
+            await session.commit()
+
     async def find_by_document_no(
         self, document_no: str
     ) -> Optional[VerificationRequest]:

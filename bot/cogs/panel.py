@@ -11,7 +11,9 @@
 
 from __future__ import annotations
 
+import io
 import logging
+from datetime import datetime
 from typing import Optional
 
 import discord
@@ -53,62 +55,140 @@ MAX_ACTIONS = 5
 # --------------------------------------------------------------------------- #
 # 모달: 자기 신고 입원 이력 등록
 # --------------------------------------------------------------------------- #
-class AdmissionModal(discord.ui.Modal, title="입원 이력 등록"):
-    """병원 + 입퇴원 연·월을 입력받아 자기 신고 이력을 등록한다."""
+def _year_options() -> list[discord.SelectOption]:
+    """올해부터 40년 전까지의 연도 옵션."""
+    current = datetime.now().year
+    return [
+        discord.SelectOption(label=f"{y}년", value=str(y))
+        for y in range(current, current - 40, -1)
+    ]
 
-    병원 = discord.ui.TextInput(
-        label="병원 이름",
-        placeholder="예: 국립정신건강센터",
-        max_length=50,
-    )
-    입원연도 = discord.ui.TextInput(label="입원 연도", placeholder="예: 2020", max_length=4)
-    입원월 = discord.ui.TextInput(label="입원 월 (1~12)", placeholder="예: 3", max_length=2)
-    퇴원연도 = discord.ui.TextInput(
-        label="퇴원 연도 (입원 중이면 비워두세요)", required=False, max_length=4
-    )
-    퇴원월 = discord.ui.TextInput(
-        label="퇴원 월 (1~12)", required=False, max_length=2
-    )
 
-    def __init__(self, bot: MindFinderBot, service: VerificationService) -> None:
-        super().__init__()
+def _month_options() -> list[discord.SelectOption]:
+    return [discord.SelectOption(label=f"{m}월", value=str(m)) for m in range(1, 13)]
+
+
+class HospitalChooseView(discord.ui.View):
+    """병원을 **선택**(드롭다운)한다. 선택 후 다음 단계로 이어진다."""
+
+    def __init__(
+        self, bot: MindFinderBot, service: VerificationService, mode: str
+    ) -> None:
+        super().__init__(timeout=300)
         self.bot = bot
         self.service = service
+        self.mode = mode
+        self.hospitals: list = []
 
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        async def _proceed(inner: discord.Interaction) -> None:
-            await self._register(inner)
-
-        # 인증 전 약관/개인정보 필수 동의
-        if not await ensure_consent(self.bot, interaction, _proceed):
-            return
-        await _proceed(interaction)
-
-    async def _register(self, interaction: discord.Interaction) -> None:
-        try:
-            start_year = int(str(self.입원연도.value).strip())
-            start_month = int(str(self.입원월.value).strip())
-            end_year = (
-                int(str(self.퇴원연도.value).strip())
-                if self.퇴원연도.value and str(self.퇴원연도.value).strip()
-                else None
+    async def load(self) -> "HospitalChooseView":
+        self.hospitals = list(await self.bot.hospitals.list_all())
+        options = [
+            discord.SelectOption(
+                label=hospital_display_name(h.name)[:100], value=str(h.id)
             )
-            end_month = (
-                int(str(self.퇴원월.value).strip())
-                if self.퇴원월.value and str(self.퇴원월.value).strip()
-                else None
-            )
-        except ValueError:
+            for h in self.hospitals[:25]
+        ]
+        if not options:
+            options = [
+                discord.SelectOption(label="등록된 병원이 없습니다", value="0")
+            ]
+        select: discord.ui.Select = discord.ui.Select(
+            placeholder="병원을 선택하세요", options=options
+        )
+        select.callback = self._on_select  # type: ignore[method-assign]
+        self.add_item(select)
+        return self
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        values = interaction.data.get("values", []) if interaction.data else []
+        if not values or values[0] == "0":
             await interaction.response.send_message(
-                "⚠️ 연도/월은 숫자로 입력해주세요.", ephemeral=True
+                "선택할 병원이 없습니다. ‘기타 병원 직접 입력’으로 요청해 주세요.",
+                ephemeral=True,
+            )
+            return
+        hospital_id = int(values[0])
+        hospital = await self.bot.hospitals.get_by_id(hospital_id)
+        if hospital is None:
+            await interaction.response.send_message(
+                "병원을 찾을 수 없습니다.", ephemeral=True
+            )
+            return
+        if self.mode == "verify":
+            await interaction.response.send_modal(
+                UnifiedVerifyModal(self.bot, self.service, hospital_id)
+            )
+            return
+        await interaction.response.send_message(
+            f"**{hospital_display_name(hospital.name)}** 입원 기간을 선택하세요.",
+            view=PeriodPickerView(self.bot, self.service, hospital_id),
+            ephemeral=True,
+        )
+
+
+class PeriodPickerView(discord.ui.View):
+    """연/월 드롭다운(Month Picker)으로 입원 기간을 고른다 (타이핑 없음)."""
+
+    def __init__(
+        self, bot: MindFinderBot, service: VerificationService, hospital_id: int
+    ) -> None:
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.service = service
+        self.hospital_id = hospital_id
+
+        self.start_year = discord.ui.Select(
+            placeholder="입원 연도", options=_year_options()
+        )
+        self.start_month = discord.ui.Select(
+            placeholder="입원 월", options=_month_options()
+        )
+        self.end_year = discord.ui.Select(
+            placeholder="퇴원 연도 (입원 중이면 비워두세요)",
+            options=_year_options(),
+            required=False,
+        )
+        self.end_month = discord.ui.Select(
+            placeholder="퇴원 월 (입원 중이면 비워두세요)",
+            options=_month_options(),
+            required=False,
+        )
+        for item in (self.start_year, self.start_month, self.end_year, self.end_month):
+            self.add_item(item)
+
+    @discord.ui.button(label="이대로 등록", style=discord.ButtonStyle.success, row=4)
+    async def submit(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        def _pick(select: discord.ui.Select) -> Optional[int]:
+            return int(select.values[0]) if select.values else None
+
+        start_year = _pick(self.start_year)
+        start_month = _pick(self.start_month)
+        if start_year is None or start_month is None:
+            await interaction.response.send_message(
+                "⚠️ 입원 연도와 월을 선택해주세요.", ephemeral=True
+            )
+            return
+        end_year = _pick(self.end_year)
+        end_month = _pick(self.end_month)
+        is_ongoing = end_year is None and end_month is None
+        if not is_ongoing and (end_year is None or end_month is None):
+            await interaction.response.send_message(
+                "⚠️ 퇴원 연도와 월을 모두 선택하거나, 둘 다 비워주세요.", ephemeral=True
             )
             return
 
-        is_ongoing = end_year is None and end_month is None
+        hospital = await self.bot.hospitals.get_by_id(self.hospital_id)
+        if hospital is None:
+            await interaction.response.send_message(
+                "병원을 찾을 수 없습니다.", ephemeral=True
+            )
+            return
         try:
             _id, period, hospital_name = await self.service.register_admission(
                 user_id=interaction.user.id,
-                hospital_name=str(self.병원.value),
+                hospital_name=hospital.name,
                 start_year=start_year,
                 start_month=start_month,
                 end_year=end_year,
@@ -119,7 +199,6 @@ class AdmissionModal(discord.ui.Modal, title="입원 이력 등록"):
             await interaction.response.send_message(f"⚠️ {exc}", ephemeral=True)
             return
 
-        # 자기 신고 등록 → 1단계 역할 부여 (전체 커뮤니티 열람)
         if interaction.guild is not None:
             member = interaction.guild.get_member(interaction.user.id)
             if member is not None:
@@ -131,35 +210,25 @@ class AdmissionModal(discord.ui.Modal, title="입원 이력 등록"):
         embed = discord.Embed(
             title="✅ 입원 이력이 등록되었습니다",
             description=(
-                f"**병원**: {hospital_name}\n"
+                f"**병원**: {hospital_display_name(hospital_name)}\n"
                 f"**기간**: {period.text()}\n"
                 f"**상태**: {VERIFICATION_LABEL['self_reported']}"
             ),
             color=discord.Color.yellow(),
         )
         embed.set_footer(text="서류 인증을 받으면 병원·기간 커뮤니티와 매칭을 이용할 수 있습니다.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.edit_message(content=None, embed=embed, view=None)
 
 
 # --------------------------------------------------------------------------- #
-# 모달: 통합 서류 인증 (병원 선택 + 기간 입력 + PDF 업로드)
+# 모달: 통합 서류 인증 (자료 업로드만) — 병원은 앞 단계 드롭다운에서 선택
 # --------------------------------------------------------------------------- #
 class UnifiedVerifyModal(discord.ui.Modal, title="서류 인증"):
-    """선택한 병원의 입원 기간과 서류(PDF)를 **창에서** 입력받아 인증한다.
+    """사용자는 **자료 업로드만** 한다.
 
-    · 서울대병원 계열 → 창에서 올린 PDF 를 자동 진위확인
-    · 그 외 병원 → 기간을 입력해 관리자 수동 심사 요청
-
-    병원은 앞 단계의 드롭다운(HospitalPickView)에서 고르고,
-    PDF 는 이 창(모달) 안에서 **업로드**한다. (Select 가 없어 FileUpload 허용)
+    · 서울대병원 계열 → 올린 PDF 에서 기간·병원을 자동 추출해 자동 인증
+    · 그 외 병원 → 자료만 접수하고, **병원·기간은 관리자가 승인 시 입력**
     """
-
-    기간 = discord.ui.TextInput(
-        label="입원 기간 (예: 2020-03 ~ 2020-06)",
-        placeholder="2020-03 ~ 2020-06 · 입원 중이면 시작만 입력",
-        required=False,
-        max_length=40,
-    )
 
     def __init__(
         self,
@@ -171,14 +240,13 @@ class UnifiedVerifyModal(discord.ui.Modal, title="서류 인증"):
         self.bot = bot
         self.service = service
         self.hospital_id = hospital_id
-        # PDF 업로드 (서울대병원 계열은 필수, 그 외는 비워둠)
         self.서류 = discord.ui.FileUpload(
-            custom_id="mf:verify:pdf", required=False, max_values=1
+            custom_id="mf:verify:pdf", required=True, max_values=1
         )
         self.add_item(
             discord.ui.Label(
-                text="입퇴원 사실확인서 PDF (서울대병원 계열)",
-                description="서울대병원 계열은 PDF 필수 · 그 외 병원은 비워두세요.",
+                text="입퇴원 증빙 서류 (PDF)",
+                description="PDF 파일을 업로드하세요. 기간·병원은 서류/관리자가 확인합니다.",
                 component=self.서류,
             )
         )
@@ -193,23 +261,21 @@ class UnifiedVerifyModal(discord.ui.Modal, title="서류 인증"):
 
         attachments = list(getattr(self.서류, "values", []) or [])
         attachment = attachments[0] if attachments else None
-        if attachment is not None and not attachment.filename.lower().endswith(".pdf"):
+        if attachment is None:
+            await interaction.response.send_message(
+                "⚠️ 증빙 서류(PDF)를 업로드해주세요.", ephemeral=True
+            )
+            return
+        if not attachment.filename.lower().endswith(".pdf"):
             await interaction.response.send_message(
                 "⚠️ PDF 파일만 제출할 수 있습니다.", ephemeral=True
             )
             return
 
         if self.service.supports_auto_verify(hospital.name):
-            if attachment is None:
-                await interaction.response.send_message(
-                    f"📄 **{hospital_display_name(hospital.name)}** 은(는) "
-                    "입퇴원 사실확인서 **PDF** 를 창에서 업로드해야 합니다.",
-                    ephemeral=True,
-                )
-                return
             await self._submit_auto(interaction, hospital, attachment)
             return
-        await self._submit_manual(interaction, hospital)
+        await self._submit_manual(interaction, hospital, attachment)
 
     async def _submit_auto(
         self,
@@ -217,14 +283,7 @@ class UnifiedVerifyModal(discord.ui.Modal, title="서류 인증"):
         hospital,
         attachment,
     ) -> None:
-        """서울대병원 계열: 사실확인서 PDF 자동 진위확인."""
-        if attachment is None:
-            await interaction.response.send_message(
-                f"⚠️ **{hospital_display_name(hospital.name)}** 은(는) "
-                "입퇴원 사실확인서 **PDF** 가 필요합니다.",
-                ephemeral=True,
-            )
-            return
+        """서울대병원 계열: PDF 에서 기간을 추출해 자동 진위확인 (사용자 입력 없음)."""
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             pdf_bytes = await attachment.read()
@@ -258,71 +317,63 @@ class UnifiedVerifyModal(discord.ui.Modal, title="서류 인증"):
             embed.set_footer(text="정신건강의학과 입원 이력이 인증되었습니다.")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    async def _submit_manual(self, interaction: discord.Interaction, hospital) -> None:
-        """그 외 병원: 기간을 입력받아 자기 신고 등록 후 관리자 수동 심사 요청."""
-        try:
-            start_year, start_month, end_year, end_month = parse_period_input(
-                str(self.기간.value or "")
-            )
-        except PeriodError as exc:
-            await interaction.response.send_message(f"⚠️ {exc}", ephemeral=True)
-            return
-
-        is_ongoing = end_year is None and end_month is None
-        try:
-            admission_id, period, hospital_name = await self.service.register_admission(
-                user_id=interaction.user.id,
-                hospital_name=hospital.name,
-                start_year=start_year,
-                start_month=start_month,
-                end_year=end_year,
-                end_month=end_month,
-                is_ongoing=is_ongoing,
-            )
-        except PeriodError as exc:
-            await interaction.response.send_message(f"⚠️ {exc}", ephemeral=True)
-            return
-
-        request_id = await self.service.submit_proof(interaction.user.id, admission_id)
-
-        # 자기 신고 등록 → 1단계 역할 + 병원 채널 확보
-        if interaction.guild is not None:
-            member = interaction.guild.get_member(interaction.user.id)
-            if member is not None:
-                try:
-                    await self.bot.access.grant_tier(interaction.guild, member, 1)
-                except Exception:  # noqa: BLE001
-                    logger.exception("1단계 역할 부여 실패: user=%s", interaction.user.id)
-            try:
-                # 역할은 사용자가 커뮤니티 패널에서 선택할 때만 만든다.
-                await self.bot.channel_service.ensure_hospital_channel(
-                    interaction.guild, hospital.id, hospital_name, with_role=False
-                )
-            except Exception:  # noqa: BLE001
-                logger.exception("병원 채널 확보 실패: hospital=%s", hospital.id)
-
-        settings = self.bot.settings
-        channel_hint = (
-            f"<#{settings.verification_channel_id}>"
-            if settings.verification_channel_id
-            else "관리자가 지정한 심사 채널"
+    async def _submit_manual(
+        self, interaction: discord.Interaction, hospital, attachment
+    ) -> None:
+        """그 외 병원: 자료만 접수하고 병원·기간은 관리자가 확정한다."""
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        request_id = await self.service.submit_document_upload(
+            interaction.user.id,
+            hospital_name=hospital.name,
+            method="document",
         )
+
+        # 관리자 심사 채널에 자료(첨부)와 심사 버튼을 게시한다.
+        posted = False
+        try:
+            data = await attachment.read()
+        except discord.HTTPException:
+            data = None
+        if data is not None:
+            try:
+                await notify_admins_of_document_request(
+                    self.bot,
+                    request_id=request_id,
+                    user_id=interaction.user.id,
+                    hospital_name=hospital.name,
+                    filename=attachment.filename,
+                    data=data,
+                )
+                posted = True
+            except Exception:  # noqa: BLE001
+                logger.exception("수동 심사 접수 알림 실패: request=%s", request_id)
+
         embed = discord.Embed(
             title="📄 서류 심사가 접수되었습니다",
             description=(
-                f"**병원**: {hospital_display_name(hospital_name)}\n"
-                f"**기간**: {period.text()}\n"
+                f"**병원(선택)**: {hospital_display_name(hospital.name)}\n"
                 f"**심사번호**: `{request_id}`\n\n"
-                f"{channel_hint} 에 `심사번호: {request_id}` 와 함께 "
-                "입퇴원 증빙 서류(이미지/PDF)를 첨부해주세요.\n"
-                "관리자가 확인 후 수동으로 인증해드립니다."
+                "제출한 자료를 관리자가 확인한 뒤, **병원·기간을 입력해** "
+                "인증을 완료합니다. 별도로 입력하실 내용은 없습니다."
             ),
             color=discord.Color.orange(),
         )
+        if not posted:
+            settings = self.bot.settings
+            hint = (
+                f"<#{settings.verification_channel_id}>"
+                if settings.verification_channel_id
+                else "관리자 심사 채널"
+            )
+            embed.add_field(
+                name="안내",
+                value=f"{hint} 에 `심사번호: {request_id}` 와 함께 자료를 첨부해주세요.",
+                inline=False,
+            )
         embed.set_footer(
             text="서류 원본은 저장하지 않으며, 심사 완료 후 삭제됩니다 (지문만 보관)."
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -461,6 +512,40 @@ async def notify_admins_of_other_request(
             )
         except discord.HTTPException:
             logger.exception("기타 인증 알림 실패: request=%s", request_id)
+        return
+
+
+async def notify_admins_of_document_request(
+    bot: MindFinderBot,
+    *,
+    request_id: int,
+    user_id: int,
+    hospital_name: str,
+    filename: str,
+    data: bytes,
+) -> None:
+    """관리자 채널에 수동 서류 심사(자료 업로드)를 게시한다."""
+    for guild in bot.guilds:
+        channel = await bot.channel_service.managed_text_channel(
+            guild, ADMIN_CHANNEL_KEY
+        )
+        if channel is None:
+            continue
+        view = DocumentReviewView(bot, request_id)
+        try:
+            file = discord.File(io.BytesIO(data), filename=filename or "서류.pdf")
+            await channel.send(
+                content=(
+                    f"📄 **서류 심사 접수** (`{request_id}`)\n"
+                    f"· 제출자: <@{user_id}>\n"
+                    f"· 선택 병원: {hospital_display_name(hospital_name)}\n"
+                    "· 승인 시 **병원·기간을 입력**해야 이력이 생성됩니다."
+                ),
+                file=file,
+                view=view,
+            )
+        except discord.HTTPException:
+            logger.exception("서류 심사 알림 실패: request=%s", request_id)
         return
 
 
@@ -722,6 +807,131 @@ class OtherVerifyReviewView(discord.ui.View):
             )
         except Exception:  # noqa: BLE001
             logger.debug("기타 인증 거절 DM 실패: user=%s", req.user_id)
+
+
+class ManualApproveModal(discord.ui.Modal, title="수동 인증 승인 (병원·기간 입력)"):
+    """관리자가 병원·기간을 입력해 수동 심사를 승인한다."""
+
+    병원 = discord.ui.TextInput(
+        label="병원 이름", placeholder="예: 서울대학교어린이병원", max_length=100
+    )
+    병동 = discord.ui.TextInput(
+        label="병동 (선택)", placeholder="예: 7A병동", required=False, max_length=50
+    )
+    입원기간 = discord.ui.TextInput(
+        label="입원 기간",
+        placeholder="예: 2020-03 ~ 2020-06 · 입원 중이면 시작만",
+        required=False,
+        max_length=40,
+    )
+
+    def __init__(self, bot: MindFinderBot, request_id: int) -> None:
+        super().__init__()
+        self.bot = bot
+        self.request_id = request_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        service = VerificationService(self.bot)
+        try:
+            start_year, start_month, end_year, end_month = parse_period_input(
+                str(self.입원기간.value or "")
+            )
+        except PeriodError as exc:
+            await interaction.response.send_message(f"⚠️ {exc}", ephemeral=True)
+            return
+        is_ongoing = end_year is None and end_month is None
+        hospital_name = str(self.병원.value or "").strip()
+        ward = str(self.병동.value or "").strip() or None
+
+        req = await service.approve_manual(
+            self.request_id,
+            interaction.user.id,
+            hospital_name=hospital_name,
+            ward=ward,
+            start_year=start_year,
+            start_month=start_month,
+            end_year=end_year,
+            end_month=end_month,
+            is_ongoing=is_ongoing,
+        )
+        if req is None:
+            await interaction.response.send_message(
+                "이미 처리된 요청입니다.", ephemeral=True
+            )
+            return
+
+        # 2단계 역할 + 병원 포럼 확보 (병원 역할은 사용자 선택 시에만)
+        if interaction.guild is not None:
+            admissions = await self.bot.admissions.list_by_user(req.user_id)
+            result = next(
+                (a for a in admissions if a.id == req.admission_id),
+                _ResultShim(hospital_name),
+            )
+            try:
+                await grant_verified_access(
+                    self.bot, interaction.guild, req.user_id, result
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("수동 승인 역할 부여 실패: user=%s", req.user_id)
+
+        display = f"{hospital_name} {ward}".strip() if ward else hospital_name
+        await interaction.response.send_message(
+            f"✅ 심사 #{self.request_id} 승인 — **{display}** 이력이 생성되었습니다.",
+            ephemeral=True,
+        )
+
+
+class DocumentReviewView(discord.ui.View):
+    """관리자가 수동 서류 심사를 승인/거절하는 영구 뷰 (요청별 custom_id)."""
+
+    def __init__(self, bot: MindFinderBot, request_id: int) -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.request_id = request_id
+        approve = discord.ui.Button(
+            label="승인 (병원·기간 입력)",
+            style=discord.ButtonStyle.success,
+            custom_id=f"mf:dre:approve:{request_id}",
+        )
+        reject = discord.ui.Button(
+            label="거절", style=discord.ButtonStyle.danger,
+            custom_id=f"mf:dre:reject:{request_id}",
+        )
+        approve.callback = self._approve
+        reject.callback = self._reject
+        self.add_item(approve)
+        self.add_item(reject)
+
+    def _is_admin(self, interaction: discord.Interaction) -> bool:
+        perms = interaction.user.guild_permissions
+        return bool(perms.administrator or perms.manage_guild)
+
+    async def _approve(self, interaction: discord.Interaction) -> None:
+        if not self._is_admin(interaction):
+            await interaction.response.send_message(
+                "관리자만 처리할 수 있습니다.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(
+            ManualApproveModal(self.bot, self.request_id)
+        )
+
+    async def _reject(self, interaction: discord.Interaction) -> None:
+        if not self._is_admin(interaction):
+            await interaction.response.send_message(
+                "관리자만 처리할 수 있습니다.", ephemeral=True
+            )
+            return
+        req = await self.bot.verifications.get_by_id(self.request_id)
+        if req is None or req.status != "pending":
+            await interaction.response.send_message(
+                "이미 처리된 요청입니다.", ephemeral=True
+            )
+            return
+        await self.bot.verifications.resolve(
+            self.request_id, "rejected", interaction.user.id
+        )
+        await interaction.response.send_message("서류 심사를 거절했습니다.", ephemeral=True)
 
 
 class _ResultShim:
@@ -994,43 +1204,6 @@ class KnowledgeUserSelectView(discord.ui.View):
 
 
 # --------------------------------------------------------------------------- #
-# 병원 선택 드롭다운 (서류 인증 1단계) — 창 대신 뷰
-# --------------------------------------------------------------------------- #
-class HospitalPickView(discord.ui.View):
-    """인증할 병원을 드롭다운에서 고른다 (고르면 기간 입력 창이 열린다)."""
-
-    def __init__(
-        self, bot: MindFinderBot, service: VerificationService, hospitals: list
-    ) -> None:
-        super().__init__(timeout=180)
-        self.bot = bot
-        self.service = service
-        options = [
-            discord.SelectOption(
-                label=hospital_display_name(h.name)[:100], value=str(h.id)
-            )
-            for h in hospitals[:25]
-        ]
-        select: discord.ui.Select = discord.ui.Select(
-            placeholder="병원을 선택하세요", options=options
-        )
-        select.callback = self._on_select  # type: ignore[method-assign]
-        self.add_item(select)
-
-    async def _on_select(self, interaction: discord.Interaction) -> None:
-        values = interaction.data.get("values", []) if interaction.data else []
-        if not values:
-            await interaction.response.send_message(
-                "선택이 취소되었습니다.", ephemeral=True
-            )
-            return
-        hospital_id = int(values[0])
-        await interaction.response.send_modal(
-            UnifiedVerifyModal(self.bot, self.service, hospital_id)
-        )
-
-
-# --------------------------------------------------------------------------- #
 # 인증 패널 (영구 뷰) — 🔐-인증 채널
 # --------------------------------------------------------------------------- #
 class VerifyPanelView(discord.ui.View):
@@ -1102,7 +1275,14 @@ class VerifyPanelView(discord.ui.View):
 
     async def _do_admission(self, interaction: discord.Interaction) -> None:
         async def _proceed(inner: discord.Interaction) -> None:
-            await inner.response.send_modal(AdmissionModal(self.bot, self.vservice))
+            view = await HospitalChooseView(
+                self.bot, self.vservice, "admission"
+            ).load()
+            await inner.response.send_message(
+                "입원 이력을 등록할 **병원을 선택**하세요.",
+                view=view,
+                ephemeral=True,
+            )
 
         if not await ensure_consent(self.bot, interaction, _proceed):
             return
@@ -1110,16 +1290,12 @@ class VerifyPanelView(discord.ui.View):
 
     async def _do_verify(self, interaction: discord.Interaction) -> None:
         async def _proceed(inner: discord.Interaction) -> None:
-            hospitals = list(await self.bot.hospitals.list_all())
-            if not hospitals:
-                await inner.response.send_message(
-                    "등록된 병원이 없습니다. ‘기타 병원 직접 입력’으로 요청해 주세요.",
-                    ephemeral=True,
-                )
-                return
+            view = await HospitalChooseView(
+                self.bot, self.vservice, "verify"
+            ).load()
             await inner.response.send_message(
                 "인증할 **병원을 선택**하세요.",
-                view=HospitalPickView(self.bot, self.vservice, hospitals),
+                view=view,
                 ephemeral=True,
             )
 
@@ -2038,6 +2214,20 @@ class PanelCog(commands.Cog):
                 self.bot.add_view(OtherVerifyReviewView(self.bot, req.id))
             except Exception:  # noqa: BLE001
                 logger.exception("기타 인증 뷰 등록 실패: request=%s", req.id)
+
+        # 재시작 전 접수된 '수동 서류 심사' 검토 버튼을 다시 살린다.
+        try:
+            doc_pending = await self.bot.verifications.list_pending_by_method(
+                "document"
+            )
+        except Exception:  # noqa: BLE001
+            doc_pending = []
+            logger.exception("서류 심사 요청 조회 실패")
+        for req in doc_pending:
+            try:
+                self.bot.add_view(DocumentReviewView(self.bot, req.id))
+            except Exception:  # noqa: BLE001
+                logger.exception("서류 심사 뷰 등록 실패: request=%s", req.id)
 
         for guild in self.bot.guilds:
             # 1) 용도별 채널/카테고리 전체 구성 (인증/커뮤니티/매칭/관리자/약관/병원별)

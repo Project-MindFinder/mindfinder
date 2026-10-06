@@ -176,6 +176,13 @@ class VerificationRequest(Base):
     reviewer_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # --- 수동 심사용 (사용자는 자료만 올리고, 관리자가 병원/기간을 확정) ---
+    # 승인 시 이력(admission)을 생성할 때 쓰는 임시 병원명/병동
+    pending_hospital_name: Mapped[Optional[str]] = mapped_column(
+        String(200), nullable=True
+    )
+    pending_ward: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
     # --- 자동 진위확인 (병원 진위확인 API) ---
     # 관리자 수동 승인 없이 자동 승인되었는지 여부
     auto_verified: Mapped[bool] = mapped_column(

@@ -159,11 +159,16 @@ class VerificationService:
     # ---------- 자동 진위확인 (서울대병원) ----------
 
     async def auto_verify_pdf(
-        self, user_id: int, filename: str, pdf_bytes: bytes
+        self,
+        user_id: int,
+        filename: str,
+        pdf_bytes: bytes,
+        admission_id: Optional[int] = None,
     ) -> AutoVerifyResult:
         """서울대병원 입퇴원 사실확인서 PDF 를 자동 진위확인한다.
 
-        성공 시 입원 이력을 생성하고 진위확인 결과를 저장하며,
+        ``admission_id`` 가 주어지면 그 이력을 사용하고(기간은 문서에서 추출),
+        없으면 문서에서 추출한 병원·기간으로 새 이력을 만든다.
         호출자가 인증 역할 부여만 하면 되도록 결과를 반환한다.
         """
         settings = self.bot.settings
@@ -278,15 +283,17 @@ class VerificationService:
         )
         hospital_display = hospital_utils.hospital_display_name(hospital.name)
         await self.bot.user_repo.ensure_user(user_id)
-        admission_id = await self.bot.admissions.add(
-            user_id=user_id,
-            hospital_id=hospital.id,
-            admit_year=start_year,
-            admit_month=start_month,
-            discharge_year=end_year,
-            discharge_month=end_month,
-            is_ongoing=False,
-        )
+        if admission_id is None:
+            # 사용자가 이력을 미리 만들지 않아도 문서에서 기간을 추출해 생성한다.
+            admission_id = await self.bot.admissions.add(
+                user_id=user_id,
+                hospital_id=hospital.id,
+                admit_year=start_year,
+                admit_month=start_month,
+                discharge_year=end_year,
+                discharge_month=end_month,
+                is_ongoing=False,
+            )
 
         # 8) 서울대병원 진위확인 API 호출
         client = SnuhTruthClient(
@@ -394,6 +401,70 @@ class VerificationService:
             target=f"verification:{request_id}",
         )
         return request_id
+
+    async def submit_document_upload(
+        self,
+        user_id: int,
+        *,
+        hospital_name: Optional[str] = None,
+        ward: Optional[str] = None,
+        method: str = "document",
+    ) -> int:
+        """사용자가 자료만 업로드한 수동 심사 요청을 생성한다.
+
+        병원/기간은 관리자가 승인 시 확정하므로 이력은 만들지 않는다.
+        """
+        request_id = await self.bot.verifications.create_pending_manual(
+            user_id, hospital_name=hospital_name, ward=ward, method=method
+        )
+        await self.bot.audit.log(
+            "verification.upload",
+            actor_id=user_id,
+            target=f"verification:{request_id}",
+        )
+        return request_id
+
+    async def approve_manual(
+        self,
+        request_id: int,
+        reviewer_id: int,
+        *,
+        hospital_name: str,
+        ward: Optional[str],
+        start_year: int,
+        start_month: int,
+        end_year: Optional[int],
+        end_month: Optional[int],
+        is_ongoing: bool,
+    ):
+        """관리자가 수동 심사를 승인한다.
+
+        관리자가 입력한 병원/기간으로 이력을 생성하고 검증 완료 처리한다.
+        """
+        req = await self.bot.verifications.get_by_id(request_id)
+        if req is None or req.status != "pending":
+            return None
+        display = f"{hospital_name} {ward}".strip() if ward else hospital_name
+        admission_id, period, resolved_name = await self.register_admission(
+            user_id=req.user_id,
+            hospital_name=display,
+            start_year=start_year,
+            start_month=start_month,
+            end_year=end_year,
+            end_month=end_month,
+            is_ongoing=is_ongoing,
+        )
+        await self.bot.admissions.set_verification(admission_id, "verified")
+        await self.bot.verifications.set_admission(request_id, admission_id)
+        await self.bot.verifications.resolve(request_id, "approved", reviewer_id)
+        await self.bot.audit.log(
+            "verification.approve_manual",
+            actor_id=reviewer_id,
+            target=f"verification:{request_id}",
+            detail=f"{resolved_name} {period.text()}",
+        )
+        req.admission_id = admission_id
+        return req
 
     async def approve(self, request_id: int, reviewer_id: int):
         """대기 중 심사를 승인한다. 성공 시 검증 요청을 반환한다."""
