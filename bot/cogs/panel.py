@@ -2919,6 +2919,8 @@ class PanelCog(commands.Cog):
                 except discord.HTTPException:
                     logger.debug("이전 패널 삭제 실패: %s", msg.id)
             logger.info("패널 변경 감지 → 재게시: channel=%s marker=%s", channel.id, marker)
+            # 삭제로 생긴 '고정 해제' 시스템 메시지를 정리한다.
+            await self._delete_pin_system_messages(channel)
 
         # 패널이 없으면(또는 변경으로 지웠으면) 새로 게시하고 고정한다.
         try:
@@ -2926,10 +2928,35 @@ class PanelCog(commands.Cog):
             logger.info("패널 게시: channel=%s marker=%s", channel.id, marker)
             try:
                 await sent.pin(reason="MindFinder 상시 패널 고정")
+                # 고정 시 생기는 '...고정하셨어요' 시스템 메시지를 삭제한다.
+                await self._delete_pin_system_messages(channel)
             except discord.HTTPException:
                 logger.debug("패널 고정 실패: channel=%s", channel.id)
         except discord.HTTPException:
             logger.exception("패널 전송 실패: channel=%s", channel.id)
+
+    @staticmethod
+    async def _delete_pin_system_messages(
+        channel: discord.TextChannel, *, limit: int = 20
+    ) -> None:
+        """채널의 '고정/고정 해제' 시스템 메시지를 삭제한다.
+
+        봇이 패널을 고정/삭제할 때 디스코드가 자동으로 남기는
+        '...님이 이 채널에 메시지를 고정하셨어요' 류의 안내 메시지를 지운다.
+        """
+        pin_types = {
+            discord.MessageType.pins_add,
+            discord.MessageType.pins_remove,
+        }
+        try:
+            async for msg in channel.history(limit=limit):
+                if msg.type in pin_types:
+                    try:
+                        await msg.delete()
+                    except discord.HTTPException:
+                        logger.debug("고정 시스템 메시지 삭제 실패: %s", msg.id)
+        except discord.HTTPException:
+            logger.debug("고정 시스템 메시지 조회 실패: channel=%s", channel.id)
 
     # ---------- 패널 임베드 ----------
 
