@@ -103,6 +103,37 @@ class MindFinderBot(commands.Bot):
         await seed_all(self.db)
         await self._load_cogs()
         await self._sync_commands()
+        # 설정된 서버(GUILD_ID)에서만 동작한다.
+        if self.settings.guild_id:
+            logger.info(
+                "운영 서버 제한: guild_id=%s 에서만 동작합니다.", self.settings.guild_id
+            )
+        else:
+            logger.warning(
+                "GUILD_ID 가 설정되지 않아 모든 서버에서 동작합니다. "
+                "운영 시에는 .env 에 GUILD_ID 를 지정하세요."
+            )
+
+    def _is_allowed_guild(self, guild: discord.Guild | None) -> bool:
+        """이 봇이 동작해야 하는 서버인지 확인한다 (GUILD_ID 기준)."""
+        if guild is None:
+            return False
+        if not self.settings.guild_id:
+            return True
+        return guild.id == self.settings.guild_id
+
+    @commands.Cog.listener()
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        """허용되지 않은 서버에 초대되면 즉시 나간다."""
+        if self._is_allowed_guild(guild):
+            return
+        logger.warning(
+            "허용되지 않은 서버 초대 → 자동 퇴장: %s (ID: %s)", guild.name, guild.id
+        )
+        try:
+            await guild.leave()
+        except discord.HTTPException:
+            logger.exception("서버 자동 퇴장 실패: guild=%s", guild.id)
 
     async def _load_cogs(self) -> None:
         """cogs 디렉터리의 확장 모듈을 로드한다."""
@@ -141,6 +172,16 @@ class MindFinderBot(commands.Bot):
 
     async def on_ready(self) -> None:
         """봇이 준비되면 로그를 남긴다."""
+        # 허용되지 않은 서버(재시작 전 초대된 곳 포함)에서 나간다.
+        for guild in list(self.guilds):
+            if not self._is_allowed_guild(guild):
+                logger.warning(
+                    "허용되지 않은 서버 → 자동 퇴장: %s (ID: %s)", guild.name, guild.id
+                )
+                try:
+                    await guild.leave()
+                except discord.HTTPException:
+                    logger.exception("서버 자동 퇴장 실패: guild=%s", guild.id)
         logger.info(
             "봇 로그인 완료: %s (ID: %s) / 길드 %d개",
             self.user, getattr(self.user, "id", "?"), len(self.guilds),

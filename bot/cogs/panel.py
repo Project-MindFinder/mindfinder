@@ -2285,6 +2285,10 @@ class PanelCog(commands.Cog):
         """인증 채널에 올라온 서울대병원 PDF 를 자동 진위확인한다."""
         if message.author.bot or message.guild is None:
             return
+        # 운영 서버(GUILD_ID)에서만 동작한다.
+        allowed = getattr(self.bot, "_is_allowed_guild", None)
+        if callable(allowed) and not allowed(message.guild):
+            return
         if not message.attachments:
             return
 
