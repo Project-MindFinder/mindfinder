@@ -314,10 +314,11 @@ async def test_auto_verify_creates_multiple_admissions(
     assert result.approved is True
     rows = await bot.admissions.list_by_user(1)
     assert len(rows) == 2
-    # 대표(가장 이른) 이력만 검증 완료로 표시된다.
+    # 여러 건의 입원 이력이 각각 개별적으로 검증 완료 처리된다.
     verified = [r for r in rows if r.verification == "verified"]
-    assert len(verified) == 1
-    assert (verified[0].admit_year, verified[0].admit_month) == (2020, 3)
+    assert len(verified) == 2
+    periods = sorted((r.admit_year, r.admit_month) for r in verified)
+    assert periods == [(2020, 3), (2021, 1)]
 
 
 async def test_auto_verify_approved_creates_verified_admission(

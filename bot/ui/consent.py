@@ -48,6 +48,7 @@ def _url_line(bot: "MindFinderBot", doc_type: str) -> str:
     """문서 전문 링크 문구를 만든다.
 
     `.env` URL 설정이 없으면 약관 채널에 게시된 메시지 링크를 사용한다.
+    (약관 채널은 전체 공개이므로 누구나 열람할 수 있다.)
     """
     url = bot.consent_service.doc_urls().get(doc_type)
     terms = getattr(bot, "terms_service", None)
@@ -55,7 +56,7 @@ def _url_line(bot: "MindFinderBot", doc_type: str) -> str:
         url = terms.doc_urls().get(doc_type)
     if url:
         return f"[전문 보기]({url})"
-    return "전문은 **📜 약관·개인정보** 채널에서 확인하실 수 있습니다."
+    return "전문은 **📜 이용약관·개인정보처리방침** 채널에서 확인하실 수 있습니다."
 
 
 def build_consent_embed(bot: "MindFinderBot") -> discord.Embed:

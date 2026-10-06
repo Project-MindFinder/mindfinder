@@ -199,7 +199,10 @@ class TermsService:
         return self._urls.get(doc_type)
 
     def doc_urls(self) -> dict[str, Optional[str]]:
-        """문서 종류별 URL. `.env` 설정값이 있으면 그것을, 없으면 게시 링크."""
+        """문서 종류별 URL. `.env` 설정값이 있으면 그것을, 없으면 게시 링크.
+
+        약관 채널은 전체 공개 채널이므로 게시 링크(jump_url)도 누구나 열 수 있다.
+        """
         settings = self.bot.settings
         configured = {
             DOC_PRIVACY: settings.privacy_policy_url,

@@ -939,7 +939,7 @@ class HospitalRequestModal(discord.ui.Modal, title="기타 병원 추가 요청"
         label="병원 이름", placeholder="예: 국립정신건강센터", max_length=100
     )
     병동 = discord.ui.TextInput(
-        label="병동 (선택)", placeholder="예: 62병동", required=False, max_length=50
+        label="병동", placeholder="예: 7A병동 / 62병동", max_length=50
     )
     사유 = discord.ui.TextInput(
         label="추가 사유 (선택)",
@@ -958,6 +958,12 @@ class HospitalRequestModal(discord.ui.Modal, title="기타 병원 추가 요청"
         if len(name) < 2:
             await interaction.response.send_message(
                 "⚠️ 병원 이름을 2자 이상 입력해주세요.", ephemeral=True
+            )
+            return
+        # 병동은 필수 입력이다 (공백만 입력한 경우도 막는다).
+        if not str(self.병동.value or "").strip():
+            await interaction.response.send_message(
+                "⚠️ 병동을 입력해주세요.", ephemeral=True
             )
             return
         # 이미 등록된 병원이면 바로 안내한다.
@@ -1476,7 +1482,7 @@ class IncomingRequestView(discord.ui.View):
 # --------------------------------------------------------------------------- #
 # 지식기반 인증 (패널 버튼용)
 # --------------------------------------------------------------------------- #
-class KnowledgeAskModal(discord.ui.Modal, title="지식기반 인증 질문 보내기"):
+class KnowledgeAskModal(discord.ui.Modal, title="지식기반 인증하기"):
     """서류 인증을 마친 사용자가 동료에게 병동 경험 질문을 보낸다."""
 
     질문 = discord.ui.TextInput(
@@ -1530,7 +1536,8 @@ class KnowledgeAskModal(discord.ui.Modal, title="지식기반 인증 질문 보�
             )
             return
         await interaction.response.send_message(
-            "✅ 질문을 보냈습니다. 상대가 답변하면 '지식 인증 현황'에서 판정할 수 있습니다.",
+            "✅ 질문을 보냈습니다. 상대가 답변하면 '지식기반 인증 현황'에서 "
+            "판정할 수 있습니다.",
             ephemeral=True,
         )
 
@@ -1606,10 +1613,6 @@ class VerifyPanelView(discord.ui.View):
             custom_id="mf:v_action",
             options=[
                 discord.SelectOption(
-                    label="입원 이력 등록", value="admission", emoji="📝",
-                    description="병원·기간을 입력해 자기 신고 이력을 등록",
-                ),
-                discord.SelectOption(
                     label="서류 인증", value="verify", emoji="📄",
                     description="병원을 고른 뒤 서류·기간으로 2단계 인증",
                 ),
@@ -1620,10 +1623,6 @@ class VerifyPanelView(discord.ui.View):
                 discord.SelectOption(
                     label="기타 병원 직접 입력", value="request", emoji="🏥",
                     description="목록에 없는 병원을 직접 입력해 등록 요청",
-                ),
-                discord.SelectOption(
-                    label="내 이력", value="history", emoji="📋",
-                    description="내 입원 이력과 인증 상태 확인",
                 ),
             ],
         )
@@ -1970,21 +1969,31 @@ class MatchPanelView(discord.ui.View):
 # --------------------------------------------------------------------------- #
 # 커뮤니티 패널 (영구 뷰) — 💬-전체-커뮤니티 채널
 # --------------------------------------------------------------------------- #
-class HospitalRoleSelectView(discord.ui.View):
-    """사용자가 병원 역할을 직접 '선택'하는 드롭다운 (DB 저장 + 역할 부여)."""
+class DisplayScopeView(discord.ui.View):
+    """내 입원 정보(역할태그/프로필)를 **어디까지 노출할지** 선택한다."""
 
-    def __init__(self, bot: MindFinderBot, hospitals: list) -> None:
+    # (값, 라벨, 설명)
+    _OPTIONS = [
+        ("period", "병원 + 기간까지", "내가 입원했던 병원과 기간을 함께 표시"),
+        ("hospital", "병원만", "입원했던 병원만 표시 (기간은 비공개)"),
+        ("none", "아무것도 안 보이게 (비공개)", "입원 정보를 표시하지 않음"),
+    ]
+
+    def __init__(self, bot: MindFinderBot, current: str) -> None:
         super().__init__(timeout=180)
         self.bot = bot
-        options = []
-        for hospital in hospitals[:25]:
-            label = hospital_display_name(hospital.name)
-            options.append(
-                discord.SelectOption(label=label[:100], value=str(hospital.id))
+        options = [
+            discord.SelectOption(
+                label=label,
+                value=value,
+                description=description,
+                default=(value == current),
             )
+            for value, label, description in self._OPTIONS
+        ]
         select: discord.ui.Select = discord.ui.Select(
-            placeholder="커뮤니티에 참여할 병원을 선택하세요",
-            min_values=0,
+            placeholder="내 입원 정보 공개 범위를 선택하세요",
+            min_values=1,
             max_values=1,
             options=options,
         )
@@ -1992,158 +2001,29 @@ class HospitalRoleSelectView(discord.ui.View):
         self.add_item(select)
 
     async def _on_select(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            await interaction.response.send_message(
-                "서버에서만 사용할 수 있습니다.", ephemeral=True
-            )
-            return
         values = interaction.data.get("values", []) if interaction.data else []
         if not values:
             await interaction.response.send_message(
                 "선택이 취소되었습니다.", ephemeral=True
             )
             return
-        hospital_id = int(values[0])
-        hospital = await self.bot.hospitals.get_by_id(hospital_id)
-        if hospital is None:
-            await interaction.response.send_message(
-                "병원을 찾을 수 없습니다.", ephemeral=True
-            )
-            return
-        # 선택 저장(DB) + 역할/채널 확보 + 기간 스레드 초대
-        await self.bot.access.set_hospital_optin(interaction.user.id, hospital_id, True)
-        await self.bot.channel_service.ensure_optin_hospital(
-            interaction.guild, interaction.user.id, hospital_id, hospital.name
+        scope = values[0]
+        await self.bot.display_prefs.set_scope(interaction.user.id, scope)
+        label = next(
+            (lbl for val, lbl, _ in self._OPTIONS if val == scope), scope
         )
-        try:
-            await self.bot.channel_service.ensure_community_access(
-                interaction.guild, interaction.user.id
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("커뮤니티 접근 동기화 실패: user=%s", interaction.user.id)
         await interaction.response.send_message(
-            f"✅ **{hospital_display_name(hospital.name)}** 커뮤니티에 참여했습니다. "
-            "이제 이 병원의 병원·기간 커뮤니티 채널이 보입니다.",
-            ephemeral=True,
-        )
-
-
-class HospitalRoleDeselectView(discord.ui.View):
-    """사용자가 선택한 병원 역할을 '해제'하는 드롭다운 (역할 회수)."""
-
-    def __init__(self, bot: MindFinderBot, hospitals: list) -> None:
-        super().__init__(timeout=180)
-        self.bot = bot
-        options = []
-        for hospital in hospitals[:25]:
-            label = hospital_display_name(hospital.name)
-            options.append(
-                discord.SelectOption(label=label[:100], value=str(hospital.id))
-            )
-        select: discord.ui.Select = discord.ui.Select(
-            placeholder="해제할 병원을 선택하세요",
-            min_values=0,
-            max_values=1,
-            options=options,
-        )
-        select.callback = self._on_select  # type: ignore[method-assign]
-        self.add_item(select)
-
-    async def _on_select(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            await interaction.response.send_message(
-                "서버에서만 사용할 수 있습니다.", ephemeral=True
-            )
-            return
-        values = interaction.data.get("values", []) if interaction.data else []
-        if not values:
-            await interaction.response.send_message(
-                "선택이 취소되었습니다.", ephemeral=True
-            )
-            return
-        hospital_id = int(values[0])
-        hospital = await self.bot.hospitals.get_by_id(hospital_id)
-        if hospital is None:
-            await interaction.response.send_message(
-                "병원을 찾을 수 없습니다.", ephemeral=True
-            )
-            return
-        await self.bot.access.set_hospital_optin(
-            interaction.user.id, hospital_id, False
-        )
-        member = interaction.guild.get_member(interaction.user.id)
-        if member is not None:
-            await self.bot.access.revoke_hospital_role(
-                interaction.guild, member, hospital_id
-            )
-        await interaction.response.send_message(
-            f"⚪ **{hospital_display_name(hospital.name)}** 커뮤니티 참여를 해제했습니다.",
+            f"✅ 공개 범위를 **{label}** 로 설정했습니다.",
             ephemeral=True,
         )
 
 
 class CommunityPanelView(discord.ui.View):
-    """커뮤니티 패널: 병원 역할 선택(opt-in) / 내 기간 스레드."""
+    """커뮤니티 패널: 인증 기반 병원·기간 커뮤니티 / 지식기반 인증 / 내 정보."""
 
     def __init__(self, bot: MindFinderBot) -> None:
         super().__init__(timeout=None)
         self.bot = bot
-
-    async def _verified_hospitals(self, user_id: int) -> list:
-        """사용자가 인증(2단계)받은 병원 객체 목록."""
-        verified_ids = set(await self.bot.access.verified_hospital_ids(user_id))
-        hospitals = []
-        for hospital in await self.bot.hospitals.list_all():
-            if hospital.id in verified_ids:
-                hospitals.append(hospital)
-        return hospitals
-
-    @discord.ui.button(
-        label="병원 역할 선택", style=discord.ButtonStyle.success,
-        custom_id="mf:c_select", row=0,
-    )
-    async def select_hospital(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
-    ) -> None:
-        """내가 인증받은 병원 중 참여할 병원 역할을 직접 선택한다."""
-        hospitals = await self._verified_hospitals(interaction.user.id)
-        if not hospitals:
-            await interaction.response.send_message(
-                "먼저 **서류 인증(2단계)** 을 완료해야 병원 커뮤니티 역할을 "
-                "선택할 수 있습니다.",
-                ephemeral=True,
-            )
-            return
-        await interaction.response.send_message(
-            "참여할 병원을 선택하세요. 선택한 병원의 역할이 부여되고 "
-            "**병원·기간 커뮤니티**가 열립니다.",
-            view=HospitalRoleSelectView(self.bot, hospitals),
-            ephemeral=True,
-        )
-
-    @discord.ui.button(
-        label="병원 역할 해제", style=discord.ButtonStyle.secondary,
-        custom_id="mf:c_deselect", row=0,
-    )
-    async def deselect_hospital(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
-    ) -> None:
-        """선택한 병원 역할을 해제한다."""
-        optedin = set(await self.bot.access.optedin_hospital_ids(interaction.user.id))
-        if not optedin:
-            await interaction.response.send_message(
-                "해제할 병원 역할이 없습니다.", ephemeral=True
-            )
-            return
-        hospitals = []
-        for hospital in await self.bot.hospitals.list_all():
-            if hospital.id in optedin:
-                hospitals.append(hospital)
-        await interaction.response.send_message(
-            "해제할 병원을 선택하세요.",
-            view=HospitalRoleDeselectView(self.bot, hospitals),
-            ephemeral=True,
-        )
 
     async def _verified_hospitals_for(self, user_id: int) -> list:
         """사용자가 서류 인증(verified)을 받은 병원 객체 목록."""
@@ -2156,7 +2036,7 @@ class CommunityPanelView(discord.ui.View):
         return hospitals
 
     @discord.ui.button(
-        label="지식기반 인증", style=discord.ButtonStyle.success,
+        label="지식기반 인증하기", style=discord.ButtonStyle.success,
         custom_id="mf:c_kverify", row=1,
     )
     async def knowledge_verify(
@@ -2202,7 +2082,7 @@ class CommunityPanelView(discord.ui.View):
         )
 
     @discord.ui.button(
-        label="지식 인증 현황", style=discord.ButtonStyle.secondary,
+        label="지식기반 인증 현황", style=discord.ButtonStyle.secondary,
         custom_id="mf:c_kstatus", row=1,
     )
     async def knowledge_status(
@@ -2260,21 +2140,20 @@ class CommunityPanelView(discord.ui.View):
             logger.exception("커뮤니티 접근 동기화 실패: user=%s", interaction.user.id)
 
         admissions = await self.bot.admissions.list_by_user(interaction.user.id)
-        optedin_ids = set(
-            await self.bot.access.optedin_hospital_ids(interaction.user.id)
-        )
         member = interaction.guild.get_member(interaction.user.id)
         embed = discord.Embed(
             title="🏥 내 병원·기간 커뮤니티",
             description=(
-                "**‘병원 역할 선택’** 으로 참여를 선택한 병원의, "
-                "내 입원 기간에 해당하는 **비공개 월 스레드**만 표시됩니다."
+                "**인증(서류·지식)을 마친** 병원의, 내 입원 기간에 해당하는 "
+                "**비공개 월 스레드**가 자동으로 열립니다.\n"
+                "같은 기간에 입원했던 인증자에게만 그 방이 보입니다."
             ),
             color=discord.Color.teal(),
         )
         found = False
         for adm in admissions:
-            if adm.hospital_id not in optedin_ids:
+            # 인증(verified)을 받은 이력만 병원·기간 커뮤니티가 열린다.
+            if adm.verification != "verified":
                 continue
             labels: list[str] = []
             for ym_value in self.bot.channel_service.months_for_admission(adm):
@@ -2301,8 +2180,8 @@ class CommunityPanelView(discord.ui.View):
             embed.add_field(
                 name="표시할 기간 스레드 없음",
                 value=(
-                    "**‘병원 역할 선택’** 버튼으로 참여할 병원을 먼저 선택하세요. "
-                    "(서류 인증을 완료한 병원만 선택할 수 있습니다.)"
+                    "먼저 **서류 인증 또는 지식기반 인증**을 완료하세요. "
+                    "인증이 완료되면 해당 병원·기간 스레드가 자동으로 열립니다."
                 ),
                 inline=False,
             )
@@ -2346,12 +2225,27 @@ class CommunityPanelView(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(
+        label="공개 범위 설정", style=discord.ButtonStyle.secondary,
+        custom_id="mf:c_display", row=2,
+    )
+    async def display_scope(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """내 입원 정보(역할태그·프로필)를 어디까지 노출할지 선택한다."""
+        current = await self.bot.display_prefs.get_scope(interaction.user.id)
+        await interaction.response.send_message(
+            "내 입원 정보를 **어디까지 공개**할지 선택하세요.\n"
+            "(병원만 / 기간까지 / 아무것도 안 보이게)",
+            view=DisplayScopeView(self.bot, current),
+            ephemeral=True,
+        )
 
 # --------------------------------------------------------------------------- #
 # 안내 패널 (영구 뷰) — 🧭-패널 채널
 # --------------------------------------------------------------------------- #
 class HelpPanelView(discord.ui.View):
-    """안내·도움말 패널: 사용법, 약관·개인정보."""
+    """안내·도움말 패널: 사용법, 이용약관·개인정보처리방침."""
 
     def __init__(self, bot: MindFinderBot) -> None:
         super().__init__(timeout=None)
@@ -2375,10 +2269,19 @@ class HelpPanelView(discord.ui.View):
         embed.add_field(
             name="🔐 인증",
             value=(
-                "**입원 이력 등록** — 병원·기간 입력 (자기 신고)\n"
-                "**서울대병원 서류 인증** — 사실확인서 PDF 자동 진위확인\n"
-                "**다른 병원 서류 인증** — 관리자 수동 심사\n"
-                "**내 이력** — 등록 이력 확인"
+                "**서류 인증** — 병원 선택 후 서류로 2단계 인증\n"
+                "**기타 방법 인증** — 서류 외 방법으로 관리자 승인 요청\n"
+                "**기타 병원 직접 입력** — 목록에 없는 병원 등록 요청"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="💬 커뮤니티·지식",
+            value=(
+                "**내 기간 스레드** — 내 인증 기간 커뮤니티 확인\n"
+                "**지식기반 인증하기** — 동료에게 병동 경험 질문\n"
+                "**지식기반 인증 현황** — 보낸 질문 응답/판정 확인\n"
+                "**공개 범위 설정** — 병원만/기간까지/비공개"
             ),
             inline=False,
         )
@@ -2398,7 +2301,7 @@ class HelpPanelView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @discord.ui.button(
-        label="약관·개인정보", style=discord.ButtonStyle.secondary,
+        label="이용약관·개인정보처리방침", style=discord.ButtonStyle.secondary,
         custom_id="mf:h_consent", row=0,
     )
     async def consent_info(
@@ -2474,6 +2377,37 @@ class HelpPanelView(discord.ui.View):
             if chans:
                 match_lines.append("내 채널: " + ", ".join(c.mention for c in chans))
         embed.add_field(name="매칭", value="\n".join(match_lines)[:1024], inline=False)
+
+        # 참여 중인 병원·기간 커뮤니티(스레드) 목록
+        if interaction.guild is not None and admissions:
+            thread_lines: list[str] = []
+            for adm in admissions:
+                if adm.verification != "verified":
+                    continue
+                names = [
+                    format_ym(ym_value)
+                    for ym_value in bot.channel_service.months_for_admission(adm)
+                ]
+                if names:
+                    thread_lines.append(
+                        f"· {hospital_display_name(adm.hospital.name)}: "
+                        + ", ".join(names[:6])
+                    )
+            if thread_lines:
+                embed.add_field(
+                    name="참여 중인 병원·기간 커뮤니티",
+                    value="\n".join(thread_lines)[:1024],
+                    inline=False,
+                )
+
+        # 입원 정보 공개 범위
+        scope = await bot.display_prefs.get_scope(interaction.user.id)
+        scope_label = {
+            "none": "비공개 (아무것도 안 보이게)",
+            "hospital": "병원만",
+            "period": "병원 + 기간까지",
+        }.get(scope, scope)
+        embed.add_field(name="공개 범위", value=scope_label, inline=False)
         embed.set_footer(text="각 기능은 해당 채널의 패널 버튼에서 사용하세요.")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -2571,7 +2505,7 @@ class AdminPanelView(discord.ui.View):
             )
             return
         await interaction.followup.send(
-            "✅ 약관·개인정보 전문을 다시 게시했습니다.", ephemeral=True
+            "✅ 이용약관·개인정보처리방침 전문을 다시 게시했습니다.", ephemeral=True
         )
 
     @discord.ui.button(
@@ -2605,6 +2539,179 @@ class AdminPanelView(discord.ui.View):
             return
         await interaction.followup.send(
             "✅ 용도별 채널/패널 구성을 완료했습니다.", ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="지식기반 인증 심사", style=discord.ButtonStyle.primary,
+        custom_id="mf:a_knowledge", row=1,
+    )
+    async def knowledge_review(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """관리자 최종 승인 대기 중인 지식기반 인증을 보여준다."""
+        if not self._is_admin(interaction):
+            await self._deny(interaction)
+            return
+        pending = await self.bot.knowledge.list_pending_review()
+        if not pending:
+            await interaction.response.send_message(
+                "승인 대기 중인 지식기반 인증이 없습니다.", ephemeral=True
+            )
+            return
+        embed = discord.Embed(
+            title=f"🧠 지식기반 인증 승인 대기 ({len(pending)}건)",
+            description=(
+                "아래 신청을 검토하세요. 판정/승인은 각 신청의 버튼 또는 "
+                "`/지식인증승인`·`/지식인증거절` 로 처리합니다."
+            ),
+            color=discord.Color.gold(),
+        )
+        for req in pending[:MAX_ACTIONS]:
+            embed.add_field(
+                name=f"신청 #{req.id} · {req.period_text}",
+                value=f"신청자: <@{req.asker_id}>\n응답자: <@{req.respondent_id}>",
+                inline=False,
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(
+        label="서류·기타 심사 목록", style=discord.ButtonStyle.primary,
+        custom_id="mf:a_reviews", row=1,
+    )
+    async def review_list(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """대기 중인 서류 심사·기타 방법 인증 목록을 보여준다."""
+        if not self._is_admin(interaction):
+            await self._deny(interaction)
+            return
+        docs = await self.bot.verifications.list_pending_by_method("document")
+        others = await self.bot.verifications.list_pending_by_method("other")
+        if not docs and not others:
+            await interaction.response.send_message(
+                "대기 중인 서류·기타 심사가 없습니다.", ephemeral=True
+            )
+            return
+        embed = discord.Embed(
+            title="📄 대기 중인 심사",
+            color=discord.Color.orange(),
+        )
+        if docs:
+            embed.add_field(
+                name=f"서류 심사 ({len(docs)}건)",
+                value="\n".join(f"#{r.id} · <@{r.user_id}>" for r in docs[:MAX_ACTIONS]),
+                inline=False,
+            )
+        if others:
+            embed.add_field(
+                name=f"기타 방법 인증 ({len(others)}건)",
+                value="\n".join(
+                    f"#{r.id} · <@{r.user_id}>" for r in others[:MAX_ACTIONS]
+                ),
+                inline=False,
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(
+        label="운영 통계", style=discord.ButtonStyle.secondary,
+        custom_id="mf:a_stats", row=1,
+    )
+    async def stats(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """등록 이력·인증·매칭 등 운영 현황 요약을 보여준다."""
+        if not self._is_admin(interaction):
+            await self._deny(interaction)
+            return
+        hospitals = await self.bot.hospitals.list_all()
+        verified_ids = await self.bot.admissions.list_verified_hospital_ids()
+        pending_hospitals = await self.bot.hospital_requests.list_by_status("pending")
+        pending_docs = await self.bot.verifications.list_pending_by_method("document")
+        pending_other = await self.bot.verifications.list_pending_by_method("other")
+        pending_knowledge = await self.bot.knowledge.list_pending_review()
+        embed = discord.Embed(title="📊 운영 통계", color=discord.Color.blurple())
+        embed.add_field(name="등록 병원", value=f"{len(hospitals)}곳", inline=True)
+        embed.add_field(
+            name="인증된 병원", value=f"{len(verified_ids)}곳", inline=True
+        )
+        embed.add_field(
+            name="대기 심사",
+            value=(
+                f"병원 추가 {len(pending_hospitals)} · "
+                f"서류 {len(pending_docs)} · 기타 {len(pending_other)} · "
+                f"지식 {len(pending_knowledge)}"
+            ),
+            inline=False,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(
+        label="역할·채널 재정비", style=discord.ButtonStyle.secondary,
+        custom_id="mf:a_maintain", row=1,
+    )
+    async def maintain(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """역할 이름 정리 + 인증 기반 병원 역할/채널 동기화를 실행한다."""
+        if not self._is_admin(interaction):
+            await self._deny(interaction)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "서버에서만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await self.bot.channel_service.migrate_role_names(interaction.guild)
+            await self.bot.channel_service.ensure_all(interaction.guild)
+        except Exception:  # noqa: BLE001
+            logger.exception("역할·채널 재정비 실패: guild=%s", interaction.guild.id)
+            await interaction.followup.send(
+                "⚠️ 재정비 중 오류가 발생했습니다.", ephemeral=True
+            )
+            return
+        await interaction.followup.send(
+            "✅ 역할 이름 정리와 인증 기반 채널 동기화를 완료했습니다.", ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="채널 이름·위치 재정비", style=discord.ButtonStyle.secondary,
+        custom_id="mf:a_channel_names", row=2,
+    )
+    async def channel_names(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """봇이 관리하는 채널/카테고리를 **ID 기준**으로 찾아 이름·위치를 맞춘다.
+
+        사용자가 채널 이름이나 카테고리를 바꿔도 ID 로 추적하므로 다시 정리할 수 있다.
+        """
+        if not self._is_admin(interaction):
+            await self._deny(interaction)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "서버에서만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        records = await self.bot.managed_channels.list_for_guild(interaction.guild.id)
+        fixed = 0
+        for record in records:
+            channel = interaction.guild.get_channel(record.discord_id)
+            if channel is None:
+                continue
+            # 채널 이름이 DB 기록과 다르면 최신 이름으로 맞춘다.
+            if getattr(channel, "name", None) != record.name:
+                try:
+                    await channel.edit(name=record.name)
+                    fixed += 1
+                except (discord.Forbidden, discord.HTTPException):
+                    logger.debug("채널 이름 재정비 실패: %s", record.discord_id)
+        await interaction.followup.send(
+            f"✅ 채널/카테고리 {len(records)}개를 ID 기준으로 확인했고, "
+            f"{fixed}개 이름을 재정비했습니다.",
+            ephemeral=True,
         )
 
 
@@ -2744,15 +2851,16 @@ class PanelCog(commands.Cog):
                 CommunityPanelView,
             ),
             (PANEL_CHANNEL_KEY, PANEL_MARKER_HELP, self._build_help_embed, HelpPanelView),
+            # 매칭 채널에도 상시 패널을 게시해 사용법을 안내한다.
+            (MATCH_CHANNEL_KEY, PANEL_MARKER_MATCH, self._build_match_embed, MatchPanelView),
         ]
         for key, marker, embed_builder, view_cls in specs:
             channel = await self._managed_channel(guild, key)
             if channel is None:
                 continue
             await self._post_panel(channel, marker, embed_builder(), view_cls(self.bot))
-        # 매칭 채널은 대화가 가능해야 하므로 패널을 게시하지 않는다.
-        # 이전에 커뮤니티/매칭 채널에 게시된 패널 메시지가 있으면 정리한다.
-        await self._delete_stale_panels(guild, (COMMUNITY_CHANNEL_KEY, MATCH_CHANNEL_KEY))
+        # 커뮤니티 채널(대화 전용)에 남아 있는 이전 패널만 정리한다.
+        await self._delete_stale_panels(guild, (COMMUNITY_CHANNEL_KEY,))
 
     async def _delete_stale_panels(self, guild: discord.Guild, keys) -> None:  # noqa: ANN001
         """지정 채널에 남아 있는 봇 패널 메시지(마커 포함)를 삭제한다."""
@@ -2834,9 +2942,8 @@ class PanelCog(commands.Cog):
     ) -> None:
         """채널에 패널 메시지를 게시/갱신한다.
 
-        기존 패널 메시지는 **지우지 않고 내용만 수정(edit)** 한다.
-        (삭제·재고정을 반복하지 않기 위함) 중복 패널만 정리하고,
-        패널이 없으면 새로 게시한다.
+        **변경사항이 있을 때만** 이전 패널 메시지를 지우고 새로 게시·고정한다.
+        내용이 동일하면 아무것도 하지 않아 불필요한 삭제·재게시·재고정을 피한다.
         """
         matches: list[discord.Message] = []
         try:
@@ -2858,21 +2965,18 @@ class PanelCog(commands.Cog):
                 and self._items_signature(self._message_items(first))
                 == self._items_signature(view.children)
             )
-            if not unchanged:
+            # 변경사항이 없으면 그대로 둔다 (삭제·재전송·고정 안 함).
+            if unchanged:
+                return
+            # 변경사항이 있으면 기존 패널(중복 포함)을 모두 지우고 새로 게시한다.
+            for msg in matches:
                 try:
-                    await first.edit(embed=embed, view=view)
-                    logger.info("패널 갱신: channel=%s marker=%s", channel.id, marker)
+                    await msg.delete()
                 except discord.HTTPException:
-                    logger.exception("패널 수정 실패: channel=%s", channel.id)
-            # 남은 중복 패널만 정리한다.
-            for extra in matches[1:]:
-                try:
-                    await extra.delete()
-                except discord.HTTPException:
-                    logger.debug("중복 패널 삭제 실패: channel=%s", channel.id)
-            return
+                    logger.debug("이전 패널 삭제 실패: %s", msg.id)
+            logger.info("패널 변경 감지 → 재게시: channel=%s marker=%s", channel.id, marker)
 
-        # 패널이 없으면 새로 게시하고 고정한다.
+        # 패널이 없으면(또는 변경으로 지웠으면) 새로 게시하고 고정한다.
         try:
             sent = await channel.send(embed=embed, view=view)
             logger.info("패널 게시: channel=%s marker=%s", channel.id, marker)
@@ -2913,8 +3017,8 @@ class PanelCog(commands.Cog):
         embed.add_field(
             name="③ 지식기반 인증 / 기타 방법",
             value=(
-                "이미 서류 인증을 마친 사람이라면 **‘지식기반 질문 보내기’** 로 "
-                "동료에게 병동 경험 질문을 보낼 수 있습니다(‘지식 인증 현황’에서 "
+                "이미 서류 인증을 마친 사람이라면 **‘지식기반 인증하기’** 로 "
+                "동료에게 병동 경험 질문을 보낼 수 있습니다(‘지식기반 인증 현황’에서 "
                 "답변·판정).\n"
                 "서류·지식 외의 방법은 **‘기타 방법 인증’** 으로 사유를 적어 "
                 "관리자 수동 승인을 요청하세요."
@@ -3001,23 +3105,27 @@ class PanelCog(commands.Cog):
             title="🛠 관리자 패널",
             description=(
                 "관리자 전용 기능입니다. (관리자 권한 보유자만 동작)\n"
-                "병원 추가 요청 검토, 약관 재게시, 채널 재구성을 할 수 있습니다."
+                "심사·통계·채널/역할 관리까지 모든 운영 기능을 이 패널에서 처리합니다."
             ),
             color=discord.Color.dark_red(),
         )
         embed.add_field(
-            name="병원 추가 요청 검토",
+            name="심사",
             value=(
-                "사용자가 ‘기타 병원 직접 입력’으로 요청한 병원을 **승인/거절**합니다.\n"
-                "승인 시 병원이 등록되고 전용 채널이 생성됩니다."
+                "· **병원 추가 요청 검토** — 사용자가 요청한 병원 승인/거절\n"
+                "· **지식기반 인증 심사** — 최종 승인 대기 목록\n"
+                "· **서류·기타 심사 목록** — 대기 중인 서류/기타 인증"
             ),
             inline=False,
         )
         embed.add_field(
-            name="약관 재게시 / 채널 재구성",
+            name="운영·정비",
             value=(
-                "약관·개인정보 전문을 다시 게시하거나, "
-                "용도별 채널·패널 구성을 다시 실행합니다."
+                "· **운영 통계** — 병원·인증·대기 심사 현황\n"
+                "· **약관 재게시** — 이용약관·개인정보처리방침 재게시\n"
+                "· **채널 재구성** — 용도별 채널/패널 재생성\n"
+                "· **역할·채널 재정비** — 역할 이름 정리 + 인증 기반 동기화\n"
+                "· **채널 이름·위치 재정비** — ID 기준으로 채널 이름 재정렬"
             ),
             inline=False,
         )

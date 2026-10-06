@@ -498,6 +498,27 @@ class HospitalRequest(Base):
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class UserDisplayPreference(Base):
+    """사용자가 역할/프로필에 **입원 정보를 어디까지 노출할지** 선택한 설정.
+
+    scope:
+        - "none"     : 아무것도 노출하지 않음 (비공개)
+        - "hospital" : 병원만 노출
+        - "period"   : 병원 + 기간까지 노출
+    """
+
+    __tablename__ = "user_display_preferences"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    scope: Mapped[str] = mapped_column(String(20), default="hospital", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class HospitalOptIn(Base):
     """사용자가 커뮤니티 패널에서 직접 '선택'한 병원 역할.
 

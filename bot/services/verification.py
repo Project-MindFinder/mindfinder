@@ -305,6 +305,8 @@ class VerificationService:
             ]
         period = entries[0].period()
         start_year, start_month, end_year, end_month = period
+        # 문서에 여러 건의 입원 이력이 있으면 모두 사람이 읽기 쉬운 문자열로 만든다.
+        period_texts = [entry.text() for entry in entries]
 
         # 사용자가 선택한 병원(hospital_id)이 있으면 그 병원을 우선한다.
         # 없으면 서류에서 판별한 병원(키워드)을 대표 병원으로 정규화한다.
@@ -319,10 +321,12 @@ class VerificationService:
             )
         hospital_display = hospital_utils.hospital_display_name(hospital.name)
         await self.bot.user_repo.ensure_user(user_id)
-        if admission_id is None:
+        # 검증할 이력 id 목록. 여러 건이면 **각각 별도 이력**으로 처리한다.
+        if admission_id is not None:
+            admission_ids: list[int] = [admission_id]
+        else:
             # 사용자가 이력을 미리 만들지 않아도 문서에서 기간을 추출해 생성한다.
-            # 여러 건이면 각각 별도 이력으로 등록하고, 대표(첫 번째)를 사용한다.
-            admission_ids: list[int] = []
+            admission_ids = []
             for entry in entries:
                 new_id = await self.bot.admissions.add(
                     user_id=user_id,
@@ -404,9 +408,11 @@ class VerificationService:
             proof_fingerprint=fingerprint.fingerprint,
             proof_shingles=fingerprint_utils.encode_shingles(fingerprint.shingles),
         )
-        await self.bot.admissions.set_verification(
-            admission_id, "verified" if approved else "rejected"
-        )
+        # 문서에서 추출한 모든 입원 이력을 각각 검증 상태로 반영한다.
+        for adm_id in admission_ids:
+            await self.bot.admissions.set_verification(
+                adm_id, "verified" if approved else "rejected"
+            )
         if not approved:
             # 실패한 시도는 재시도할 수 있도록 요청/이력을 초기화한다.
             await self._reset_failed_attempt(admission_id, cert.document_no)
@@ -417,6 +423,11 @@ class VerificationService:
             detail=f"{cert.document_no} {result.status.value}",
         )
 
+        periods_display = (
+            " / ".join(period_texts)
+            if period_texts
+            else f"{start_year}년 {start_month}월 ~ {end_year}년 {end_month}월"
+        )
         return AutoVerifyResult(
             approved=approved,
             title="자동 인증 완료" if approved else "자동 인증 실패",
@@ -424,8 +435,7 @@ class VerificationService:
             detail=(
                 f"**병원**: {hospital_display}\n"
                 f"**진료과**: {department_summary or '확인 불가'}\n"
-                f"**기간**: {start_year}년 {start_month}월 ~ "
-                f"{end_year}년 {end_month}월\n"
+                f"**기간**: {periods_display}\n"
                 f"**문서번호**: `{cert.document_no}`\n"
                 f"**발급번호**: {cert.issue_no or '?'}\n"
                 f"**진위확인**: {result.message or result.status.value}"
@@ -433,9 +443,7 @@ class VerificationService:
             document_no=cert.document_no,
             hospital_name=hospital.name,
             departments=department_summary,
-            period_text=(
-                f"{start_year}년 {start_month}월 ~ {end_year}년 {end_month}월"
-            ),
+            period_text=periods_display,
             truth_message=result.message,
         )
 

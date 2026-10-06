@@ -29,6 +29,7 @@ from bot.db.models import (
     MatchPreference,
     MatchRequest,
     User,
+    UserDisplayPreference,
     VerificationRequest,
 )
 
@@ -189,6 +190,20 @@ class AdmissionRepository:
                 .where(Admission.hospital_id == hospital_id)
             )
             return int(result.scalar_one())
+
+    async def list_verified_hospital_ids(self) -> Sequence[int]:
+        """인증(verified)된 입원 이력이 있는 병원 id 집합 (중복 제거).
+
+        '병원 역할 선택(opt-in)' 없이, 서류/지식 인증을 받은 병원의
+        채널·역할을 자동으로 확보하기 위해 사용한다.
+        """
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(Admission.hospital_id)
+                .where(Admission.verification == "verified")
+                .distinct()
+            )
+            return [row[0] for row in result.all()]
 
     async def delete_by_hospital(self, hospital_id: int) -> int:
         """특정 병원의 입원 이력을 모두 삭제한다 (병원 정리 시).
@@ -845,6 +860,14 @@ class ManagedChannelRepository:
             )
             return result.scalar_one_or_none()
 
+    async def list_for_guild(self, guild_id: int) -> Sequence[ManagedChannel]:
+        """길드의 봇 관리 채널/카테고리 매핑 전체 (이름/위치 재정비용)."""
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(ManagedChannel).where(ManagedChannel.guild_id == guild_id)
+            )
+            return result.scalars().all()
+
     async def upsert(
         self,
         guild_id: int,
@@ -1197,3 +1220,32 @@ class HospitalOptInRepository:
                 .distinct()
             )
             return [row[0] for row in result.all()]
+
+
+class UserDisplayPreferenceRepository:
+    """user_display_preferences 테이블 접근 (입원 정보 노출 범위)."""
+
+    # 허용 범위: none(비공개) | hospital(병원만) | period(병원+기간)
+    VALID_SCOPES = ("none", "hospital", "period")
+    DEFAULT_SCOPE = "hospital"
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def get_scope(self, user_id: int) -> str:
+        """사용자가 선택한 노출 범위 (없으면 기본값)."""
+        async with self.db.session() as session:
+            row = await session.get(UserDisplayPreference, user_id)
+            return row.scope if row is not None else self.DEFAULT_SCOPE
+
+    async def set_scope(self, user_id: int, scope: str) -> None:
+        """노출 범위를 저장한다 (허용값이 아니면 무시)."""
+        if scope not in self.VALID_SCOPES:
+            return
+        async with self.db.session() as session:
+            row = await session.get(UserDisplayPreference, user_id)
+            if row is None:
+                session.add(UserDisplayPreference(user_id=user_id, scope=scope))
+            else:
+                row.scope = scope
+            await session.commit()

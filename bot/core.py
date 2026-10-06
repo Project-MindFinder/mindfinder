@@ -87,6 +87,8 @@ class MindFinderBot(commands.Bot):
         self.hospital_requests = HospitalRequestRepository(self.db)
         # 사용자가 선택한 병원 역할(opt-in) 상태
         self.hospital_optins = HospitalOptInRepository(self.db)
+        # 사용자가 선택한 입원 정보 노출 범위(역할태그/프로필)
+        self.display_prefs = UserDisplayPreferenceRepository(self.db)
 
         # 도메인 서비스 (UI 비의존). 슬래시 커맨드와 상시 패널이 공유한다.
         self.verification_service = VerificationService(self)

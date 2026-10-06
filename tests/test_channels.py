@@ -46,6 +46,15 @@ class FakeRole:
 class FakeMember:
     def __init__(self, user_id: int) -> None:
         self.id = user_id
+        self.roles: list = []
+
+    async def add_roles(self, role, reason=None) -> None:  # noqa: ANN001
+        if role not in self.roles:
+            self.roles.append(role)
+
+    async def remove_roles(self, role, reason=None) -> None:  # noqa: ANN001
+        if role in self.roles:
+            self.roles.remove(role)
 
 
 class FakeThread:
@@ -263,7 +272,8 @@ async def test_ensure_all_creates_hospital_forum_without_role(
     await service.ensure_all(guild)  # type: ignore[arg-type]
 
     forums = [c for c in guild.text_channels if isinstance(c, FakeForumChannel)]
-    assert any(c.name == f"🏥-{hospital.name}" for c in forums)
+    # 채널 이름에는 병동 정보가 함께 표시된다 (예: 서울대학교병원 62병동).
+    assert any(c.name == f"🏥-{hospital.name} 62병동" for c in forums)
     # 아무도 역할을 선택하지 않았으므로 병원 역할은 생성되지 않는다.
     assert not any(r.name.startswith("MF·") for r in guild.roles)
     assert not any(r.name.endswith("인증됨") and "서울대" in r.name for r in guild.roles)
@@ -329,14 +339,15 @@ def test_months_for_admission_includes_both_ends() -> None:
     assert len(ongoing) >= 1
 
 
-async def test_ensure_community_access_only_optedin_periods(
+async def test_ensure_community_access_only_verified_periods(
     service: ChannelService, bot: FakeBot
 ) -> None:
+    """'병원 역할 선택' 없이, 인증(verified)된 이력만 기간 스레드가 열린다."""
     await bot.users.ensure_user(1)
     hospital = await bot.hospitals.create("서울대학교병원", "서울대학교병원")
     child = await bot.hospitals.create("서울대학교어린이병원", "서울대학교어린이병원")
 
-    # 2020년 3월 한 달 입원(검증 완료)
+    # 2020년 3월 한 달 입원(검증 완료) — opt-in 없이도 열려야 한다.
     adm_id = await bot.admissions.add(
         user_id=1,
         hospital_id=hospital.id,
@@ -347,7 +358,7 @@ async def test_ensure_community_access_only_optedin_periods(
         is_ongoing=False,
     )
     await bot.admissions.set_verification(adm_id, "verified")
-    # 미선택(자기 신고) 이력 — 스레드가 생기면 안 된다.
+    # 미인증(자기 신고) 이력 — 스레드가 생기면 안 된다.
     await bot.admissions.add(
         user_id=1,
         hospital_id=child.id,
@@ -357,8 +368,6 @@ async def test_ensure_community_access_only_optedin_periods(
         discharge_month=1,
         is_ongoing=False,
     )
-    # 사용자가 '서울대학교병원' 역할을 선택(opt-in)했다.
-    await bot.access.set_hospital_optin(1, hospital.id, True)
 
     guild = FakeGuild()
     await service.ensure_community_access(guild, 1)  # type: ignore[arg-type]
@@ -367,16 +376,16 @@ async def test_ensure_community_access_only_optedin_periods(
     assert "2020년 3월" in thread_names
     assert "2021년 1월" not in thread_names
 
-    # 선택한 병원 스레드에는 사용자가 추가되어 있어야 한다.
+    # 인증된 병원 스레드에는 사용자가 추가되어 있어야 한다.
     main_channel = next(
-        c for c in guild.text_channels if c.name.endswith("서울대학교병원")
+        c for c in guild.text_channels if "서울대학교병원" in c.name
     )
     assert main_channel.threads
     assert 1 in main_channel.threads[0].members
 
-    # 선택하지 않은 병원(어린이병원)에는 기간 스레드가 만들어지지 않아야 한다.
+    # 미인증 병원(어린이병원)에는 기간 스레드가 만들어지지 않아야 한다.
     child_channel = next(
-        (c for c in guild.text_channels if c.name.endswith("서울대학교어린이병원")),
+        (c for c in guild.text_channels if "서울대학교어린이병원" in c.name),
         None,
     )
     assert child_channel is None or child_channel.threads == []

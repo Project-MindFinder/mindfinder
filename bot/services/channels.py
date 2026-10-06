@@ -30,6 +30,7 @@ from bot.services.access_control import (
     TIER2_ROLE_NAME,
     AccessControlService,
 )
+from bot.utils.hospitals import hospital_display_name
 from bot.utils.periods import current_ym, format_ym
 
 if TYPE_CHECKING:  # 순환 임포트 방지를 위해 타입 검사 시에만 임포트한다.
@@ -54,9 +55,9 @@ COMMUNITY_CHANNEL_KEY = "ch:community"
 COMMUNITY_CHANNEL_NAME = "💬-전체-커뮤니티"
 NOTICE_CHANNEL_KEY = "ch:notice"
 NOTICE_CHANNEL_NAME = "📢-공지"
-# 약관·개인정보 전문 게시 채널 (1단계 이상이면 열람 가능)
+# 약관·개인정보처리방침 전문 게시 채널 (1단계 이상이면 열람 가능)
 TERMS_CHANNEL_KEY = "ch:terms"
-TERMS_CHANNEL_NAME = "📜-약관-개인정보"
+TERMS_CHANNEL_NAME = "📜-이용약관-개인정보처리방침"
 MATCH_CATEGORY_KEY = "cat:match"
 MATCH_CATEGORY_NAME = "매칭"
 MATCH_CHANNEL_KEY = "ch:match"
@@ -144,16 +145,17 @@ class ChannelService:
     async def _ensure_category(
         self, guild: discord.Guild, key: str, name: str
     ) -> Optional[discord.CategoryChannel]:
+        # 매칭은 **저장된 ID(discord_id)** 로만 한다 (이름 기준 매칭 금지).
         record = await self.bot.managed_channels.get(guild.id, key)
         if record is not None:
             channel = guild.get_channel(record.discord_id)
-            if isinstance(channel, discord.CategoryChannel):
-                return channel
-        for channel in guild.categories:
-            if channel.name == name:
-                await self.bot.managed_channels.upsert(
-                    guild.id, "category", key, channel.id, channel.name
-                )
+            if channel is not None:
+                # 이름/위치가 바뀌었으면 최신 이름으로 맞춘다.
+                if getattr(channel, "name", None) != name:
+                    try:
+                        await channel.edit(name=name)
+                    except (discord.Forbidden, discord.HTTPException):
+                        logger.debug("카테고리 이름 동기화 실패: %s", record.discord_id)
                 return channel
         if not self.bot.settings.auto_create_channels:
             return None
@@ -180,27 +182,28 @@ class ChannelService:
         *,
         sync_permissions: bool = True,
     ) -> Optional[discord.TextChannel]:
+        # 매칭은 **저장된 ID(discord_id)** 로만 한다 (이름 기준 매칭 금지).
         record = await self.bot.managed_channels.get(guild.id, key)
         channel: Optional[discord.TextChannel] = None
         if record is not None:
-            found = guild.get_channel(record.discord_id)
-            if isinstance(found, discord.TextChannel):
-                channel = found
-        if channel is None and category is not None:
-            for ch in category.text_channels:
-                if ch.name == name:
-                    channel = ch
-                    break
+            channel = guild.get_channel(record.discord_id)  # type: ignore[assignment]
         if channel is not None:
+            # 이름/카테고리가 바뀌었으면 최신 값으로 맞춘다 (ID 로 추적하므로 가능).
+            edit_kwargs: dict = {}
+            if getattr(channel, "name", None) != name:
+                edit_kwargs["name"] = name
+            if category is not None and getattr(channel, "category", None) != category:
+                edit_kwargs["category"] = category
+            if sync_permissions:
+                edit_kwargs["overwrites"] = overwrites
+            if edit_kwargs:
+                try:
+                    await channel.edit(**edit_kwargs)
+                except (discord.Forbidden, discord.HTTPException):
+                    logger.debug("채널 동기화 실패: channel=%s", channel.id)
             await self.bot.managed_channels.upsert(
                 guild.id, "channel", key, channel.id, channel.name
             )
-            # 권한 동기화 (역할 변경 반영)
-            if sync_permissions:
-                try:
-                    await channel.edit(overwrites=overwrites)
-                except (discord.Forbidden, discord.HTTPException):
-                    logger.debug("채널 권한 동기화 실패: channel=%s", channel.id)
             return channel
         if not self.bot.settings.auto_create_channels:
             return None
@@ -228,7 +231,8 @@ class ChannelService:
 
     @staticmethod
     def hospital_channel_name(hospital_name: str) -> str:
-        return _clip(f"🏥-{hospital_name}")
+        # 병동 정보가 있으면 함께 표시한다 (예: 서울대학교어린이병원 7A병동).
+        return _clip(f"🏥-{hospital_display_name(hospital_name)}")
 
     async def _ensure_forum(
         self,
@@ -239,13 +243,12 @@ class ChannelService:
         overwrites: dict,
     ) -> Optional[discord.ForumChannel]:
         """포럼 채널을 확보한다 (기간별 커뮤니티를 '게시글(스레드)'로 운영)."""
+        # 매칭은 **저장된 ID(discord_id)** 로만 한다 (이름 기준 매칭 금지).
         record = await self.bot.managed_channels.get(guild.id, key)
         channel: Optional[discord.ForumChannel] = None
         if record is not None:
             found = guild.get_channel(record.discord_id)
-            if isinstance(found, discord.ForumChannel):
-                channel = found
-            elif found is not None:
+            if found is not None:
                 ctype = getattr(found, "type", None)
                 if ctype is not None and ctype != discord.ChannelType.forum:
                     # 이전에 만든 '텍스트 채널' → 포럼으로 교체한다.
@@ -259,23 +262,23 @@ class ChannelService:
                             "기존 병원 채널 삭제 실패: %s", record.discord_id
                         )
                 else:
-                    # 타입 정보가 없는 대역(테스트) 등은 재사용한다.
+                    # 포럼이거나 타입 정보가 없는 대역(테스트)은 재사용한다.
                     channel = found  # type: ignore[assignment]
-        if channel is None and category is not None:
-            for ch in getattr(category, "channels", []):
-                if getattr(ch, "name", None) == name and isinstance(
-                    ch, discord.ForumChannel
-                ):
-                    channel = ch
-                    break
         if channel is not None:
+            # 병원명/병동 표기가 바뀌었으면 채널 이름도 최신으로 맞춘다.
+            if getattr(channel, "name", None) != name:
+                try:
+                    await channel.edit(name=name, overwrites=overwrites)
+                except (discord.Forbidden, discord.HTTPException):
+                    logger.debug("포럼 이름/권한 동기화 실패: channel=%s", channel.id)
+            else:
+                try:
+                    await channel.edit(overwrites=overwrites)
+                except (discord.Forbidden, discord.HTTPException):
+                    logger.debug("포럼 권한 동기화 실패: channel=%s", channel.id)
             await self.bot.managed_channels.upsert(
                 guild.id, "channel", key, channel.id, channel.name
             )
-            try:
-                await channel.edit(overwrites=overwrites)
-            except (discord.Forbidden, discord.HTTPException):
-                logger.debug("포럼 권한 동기화 실패: channel=%s", channel.id)
             return channel
         if not self.bot.settings.auto_create_channels:
             return None
@@ -452,9 +455,13 @@ class ChannelService:
     ) -> None:
         """인증 사용자를 자신의 이력(병원·기간)에 맞는 비공개 스레드에 초대한다.
 
-        - 서류/지식 인증을 받은 병원마다
-        - 입원 기간에 걸치는 '월 단위' 비공개 스레드를 확보하고
+        **별도 '병원 역할 선택' 없이**, 서류/지식 인증(verified)을 받은 이력을
+        기준으로 자동 처리한다.
+
+        - 인증받은 병원의 역할/포럼을 확보·부여하고
+        - 입원 기간에 걸치는 '월 단위' 비공개 스레드를 확보한 뒤
         - 사용자를 그 스레드에 추가한다.
+          (그 스레드는 같은 기간에 입원한 인증자에게만 보인다.)
         """
         member = guild.get_member(user_id)
         if member is None:
@@ -462,11 +469,22 @@ class ChannelService:
         admissions = await self.bot.admissions.list_by_user(user_id)
         if not admissions:
             return
-        # 사용자가 커뮤니티 패널에서 '선택'한 병원만 기간 스레드를 연다.
-        optin_ids = set(await self.bot.access.optedin_hospital_ids(user_id))
         for adm in admissions:
-            if adm.hospital_id not in optin_ids:
+            # 서류/지식 인증(verified)을 받은 이력만 병원·기간 커뮤니티를 연다.
+            if adm.verification != "verified":
                 continue
+            # 인증된 병원의 역할/포럼을 자동 확보하고 역할을 부여한다.
+            try:
+                await self.ensure_hospital_channel(
+                    guild, adm.hospital_id, adm.hospital.name, with_role=True
+                )
+                await self.bot.access.grant_hospital_role(
+                    guild, member, adm.hospital_id, adm.hospital.name
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "병원 역할/채널 자동 확보 실패: hospital=%s", adm.hospital_id
+                )
             for ym_value in self.months_for_admission(adm):
                 thread = await self.ensure_period_thread(
                     guild,
@@ -520,10 +538,9 @@ class ChannelService:
         await self._ensure_text(
             guild, NOTICE_CHANNEL_KEY, NOTICE_CHANNEL_NAME, community_cat, notice_ow
         )
-        # 약관·개인정보 전문 게시 채널 (1단계 이상 열람, 관리자만 작성)
-        terms_ow = self._overwrites(
-            guild, public=False, view_roles=[tier1_role, tier2_role], readonly=True
-        )
+        # 약관·개인정보처리방침 전문 게시 채널.
+        # 동의 임베드의 '전문 보기' 링크로 **누구나** 열람할 수 있도록 전체 공개한다.
+        terms_ow = self._overwrites(guild, public=True, readonly=True)
         await self._ensure_text(
             guild, TERMS_CHANNEL_KEY, TERMS_CHANNEL_NAME, community_cat, terms_ow
         )
@@ -550,25 +567,21 @@ class ChannelService:
         )
 
         # 5) 병원별 채널
-        #    역할(role)은 사용자가 커뮤니티 패널에서 '선택'했을 때만 만든다.
-        #    - 역할을 이미 선택(opt-in)한 사용자의 병원 → 채널 + 역할 확보
-        #    - 그 외 등록된 병원 → 역할 없이 채널만 확보
-        optin_hospital_ids = await self._optin_hospital_ids()
+        #    '병원 역할 선택' 없이, 인증(verified)된 이력이 있는 병원의
+        #    채널·역할을 자동으로 확보한다. 그 외 병원은 채널만 확보한다.
+        verified_hospital_ids = await self._verified_hospital_ids()
         for hospital in await self.bot.hospitals.list_all():
-            with_role = hospital.id in optin_hospital_ids
+            with_role = hospital.id in verified_hospital_ids
             await self.ensure_hospital_channel(
                 guild, hospital.id, hospital.name, with_role=with_role
             )
 
-    async def _optin_hospital_ids(self) -> set[int]:
-        """어떤 사용자든 역할을 선택한 병원 id 집합 (역할 생성 대상)."""
-        repo = getattr(self.bot, "hospital_optins", None)
-        if repo is None:
-            return set()
+    async def _verified_hospital_ids(self) -> set[int]:
+        """인증(verified)된 이력이 있는 병원 id 집합 (역할 생성 대상)."""
         try:
-            return set(await repo.list_all_enabled())
+            return set(await self.bot.admissions.list_verified_hospital_ids())
         except Exception:  # noqa: BLE001
-            logger.exception("병원 opt-in 조회 실패")
+            logger.exception("인증 병원 조회 실패")
             return set()
 
     async def migrate_role_names(self, guild: discord.Guild) -> None:
