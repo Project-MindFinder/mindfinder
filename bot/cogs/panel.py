@@ -150,8 +150,17 @@ class KnowledgeMonthPickerView(discord.ui.View):
         self.hospital_id = hospital_id
         self.year = discord.ui.Select(placeholder="연도", options=_year_options())
         self.month = discord.ui.Select(placeholder="월", options=_month_options())
+        self.year.callback = self._ack  # type: ignore[method-assign]
+        self.month.callback = self._ack  # type: ignore[method-assign]
         self.add_item(self.year)
         self.add_item(self.month)
+
+    async def _ack(self, interaction: discord.Interaction) -> None:
+        """드롭다운 선택을 조용히 접수한다 (실패 표시 방지)."""
+        try:
+            await interaction.response.defer()
+        except discord.HTTPException:
+            pass
 
     @discord.ui.button(label="이 달로 확인", style=discord.ButtonStyle.success, row=2)
     async def submit(
@@ -216,7 +225,15 @@ class PeriodPickerView(discord.ui.View):
             min_values=0,
         )
         for item in (self.start_year, self.start_month, self.end_year, self.end_month):
+            item.callback = self._ack  # type: ignore[method-assign]
             self.add_item(item)
+
+    async def _ack(self, interaction: discord.Interaction) -> None:
+        """드롭다운 선택을 조용히 접수한다 (실패 표시 방지)."""
+        try:
+            await interaction.response.defer()
+        except discord.HTTPException:
+            pass
 
     @discord.ui.button(label="이대로 등록", style=discord.ButtonStyle.success, row=4)
     async def submit(

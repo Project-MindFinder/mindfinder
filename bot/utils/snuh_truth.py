@@ -62,12 +62,28 @@ class SnuhTruthError(RuntimeError):
 
 
 def _classify(message: str) -> TruthStatus:
-    """결과 alert 메시지를 상태로 분류한다."""
+    """결과 alert 메시지를 상태로 분류한다.
+
+    성공 문구 변형(정상 발급 / 정상적으로 발급 / 발급된 문서 / 확인되었습니다 등)을
+    폭넓게 인정한다.
+    """
     text = message.replace(" ", "")
-    if "정상" in text and "발급" in text:
-        return TruthStatus.VALID
-    if "아닙니다" in text or "아니" in text or "위조" in text or "조회" in text:
+    invalid_markers = ("아닙니다", "위조")
+    if any(m in text for m in invalid_markers):
         return TruthStatus.INVALID
+    valid_markers = (
+        "정상발급",
+        "정상적으로발급",
+        "발급된",
+        "발급되었",
+        "발급사실",
+        "확인되었",
+        "정상문서",
+        "유효한",
+        "진위확인결과정상",
+    )
+    if "정상" in text or any(m in text for m in valid_markers):
+        return TruthStatus.VALID
     return TruthStatus.UNKNOWN
 
 

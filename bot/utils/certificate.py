@@ -47,6 +47,10 @@ _DOC_NO_RE = re.compile(r"문서번호\s*[:：]?\s*([A-Za-z0-9\-]{6,})")
 _ISSUE_NO_RE = re.compile(r"제\s*([0-9]{3,})\s*호")
 _YEAR_RE = re.compile(r"(19[89][0-9]|20[0-9]{2})")
 _MONTH_DAY_RE = re.compile(r"(\d{1,2})\s*월\s*(\d{1,2})\s*일")
+# '년 MM월 DD일' / 'MM월 DD일' 형태 (연도가 앞에 오는 표기 포함)
+_MONTH_DAY_ALT_RE = re.compile(r"(?:(\d{2,4})\s*년\s*)?(\d{1,2})\s*월\s*(\d{1,2})\s*일")
+# 입원 기간의 '~' 표시 (기간을 구분하는 표식)
+_TILDE_RE = re.compile(r"~")
 _PATIENT_NAME_RE = re.compile(r"성\s*명\s*[:：]?\s*([가-힣*]{2,10})")
 
 # 병원 판별 키워드
@@ -85,15 +89,30 @@ class ParsedCertificate:
     psychiatric_departments: list[str] = field(default_factory=list)
     years: list[int] = field(default_factory=list)
     month_days: list[tuple[int, int]] = field(default_factory=list)
+    # '~' 로 표시된 입원 기간의 월 목록 (있으면 period() 에서 우선 사용)
+    period_months: list[int] = field(default_factory=list)
     patient_name: str | None = None
     raw_text: str = ""
 
     def period(self) -> tuple[int, int, int, int] | None:
         """(시작 연도, 시작 월, 종료 연도, 종료 월) 를 추정한다.
 
-        연도가 하나이고 월·일 목록이 있으면 그 연도의 최소/최대 월을 기간으로 본다.
-        추정이 불가능하면 None 을 반환한다.
+        입원 기간은 문서에서 '~' 로 표시되므로, '~' 가 있는 줄/주변에서 뽑은
+        날짜를 우선 사용한다. 없으면 연·월 최소/최대를 사용한다.
         """
+        # 1) '~' 로 표시된 입원 기간 우선
+        if self.period_months:
+            months = [m for m in self.period_months if 1 <= m <= 12]
+            if months:
+                start_month, end_month = months[0], months[-1]
+                if self.years:
+                    start_year = self.years[0]
+                    end_year = self.years[-1]
+                else:
+                    start_year = end_year = 0
+                return start_year, start_month, end_year, end_month
+
+        # 2) 폴백: 전체 월 최소/최대
         if not self.years or not self.month_days:
             return None
         months = sorted({m for m, _ in self.month_days if 1 <= m <= 12})
@@ -102,7 +121,6 @@ class ParsedCertificate:
         if len(self.years) == 1:
             year = self.years[0]
             return year, months[0], year, months[-1]
-        # 연도가 여러 개면 정렬해 앞/뒤를 매칭 (근사치)
         years = sorted(self.years)
         return years[0], months[0], years[-1], months[-1]
 

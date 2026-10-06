@@ -107,41 +107,81 @@ class TermsService:
         except discord.HTTPException:
             logger.debug("약관 메시지 조회 실패: channel=%s", channel.id)
 
+    def _build_messages(self) -> list[tuple[str, str]]:
+        """(문서종류, 메시지 본문) 목록을 만든다 (첫 조각에만 제목)."""
+        result: list[tuple[str, str]] = []
+        for doc_type in (DOC_PRIVACY, DOC_TERMS):
+            text = self.read_doc(doc_type)
+            if text is None:
+                continue
+            label = DOC_LABELS.get(doc_type, doc_type)
+            chunks = split_text(text)
+            for idx, chunk in enumerate(chunks):
+                content = (
+                    f"**📜 MindFinder {label}**\n{chunk}" if idx == 0 else chunk
+                )
+                result.append((doc_type, content))
+        return result
+
+    async def _existing_bot_messages(
+        self, channel: discord.TextChannel
+    ) -> list[discord.Message]:
+        """채널에 있는 봇 메시지를 오래된 순으로 반환한다."""
+        messages: list[discord.Message] = []
+        try:
+            async for msg in channel.history(limit=100):
+                if msg.author.id == self.bot.user.id:
+                    messages.append(msg)
+        except discord.HTTPException:
+            logger.debug("약관 메시지 조회 실패: channel=%s", channel.id)
+        messages.reverse()
+        return messages
+
     async def post_all(self, guild: discord.Guild) -> dict[str, str]:
-        """약관·개인정보 전문을 전용 채널에 게시하고 문서별 URL 을 반환한다."""
+        """약관·개인정보 전문을 전용 채널에 게시하고 문서별 URL 을 반환한다.
+
+        내용이 이전과 같으면 **지우지 않고 그대로 둔다** (불필요한 삭제·재게시 방지).
+        """
         channel = await self.bot.channel_service.managed_text_channel(
             guild, "ch:terms"
         )
         if channel is None:
             logger.warning("약관 채널을 찾을 수 없습니다: guild=%s", guild.id)
             return {}
+
+        desired = self._build_messages()
+        existing = await self._existing_bot_messages(channel)
+
+        # 내용이 완전히 동일하면 그대로 유지하고 기존 링크만 재사용한다.
+        if len(existing) == len(desired) and all(
+            m.content == content for m, (_dt, content) in zip(existing, desired)
+        ):
+            urls: dict[str, str] = {}
+            for msg, (doc_type, _content) in zip(existing, desired):
+                if doc_type not in urls:
+                    urls[doc_type] = msg.jump_url
+            self._urls.update(urls)
+            logger.info("약관 변경 없음 → 재게시 생략: guild=%s", guild.id)
+            return urls
+
+        # 변경사항이 있으면 이전 메시지를 모두 지우고 새로 게시한다.
         await self._delete_previous(channel)
 
-        urls: dict[str, str] = {}
-        for doc_type in (DOC_PRIVACY, DOC_TERMS):
-            text = self.read_doc(doc_type)
-            if text is None:
-                continue
-            label = DOC_LABELS.get(doc_type, doc_type)
-            first_url: Optional[str] = None
-            chunks = split_text(text)
-            for idx, chunk in enumerate(chunks):
-                # 첫 메시지에만 문서 제목을 붙인다 (이어지는 조각은 본문만).
-                content = (
-                    f"**📜 MindFinder {label}**\n{chunk}"
-                    if idx == 0
-                    else chunk
-                )
-                try:
-                    message = await channel.send(content)
-                except discord.HTTPException:
-                    logger.exception("약관 게시 실패: doc=%s", doc_type)
-                    break
-                if first_url is None:
-                    first_url = message.jump_url
-            if first_url is not None:
-                urls[doc_type] = first_url
-                self._urls[doc_type] = first_url
+        urls = {}
+        first_url: dict[str, Optional[str]] = {}
+        for doc_type, content in desired:
+            try:
+                message = await channel.send(content)
+            except discord.HTTPException:
+                logger.exception("약관 게시 실패: doc=%s", doc_type)
+                break
+            if doc_type not in first_url:
+                first_url[doc_type] = message.jump_url
+        for doc_type, url in first_url.items():
+            if url is not None:
+                urls[doc_type] = url
+        self._urls.update(urls)
+        logger.info("약관 재게시 완료: guild=%s (%d개 메시지)", guild.id, len(desired))
         return urls
 
     async def post_all_guilds(self) -> None:
