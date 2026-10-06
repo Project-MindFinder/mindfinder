@@ -3,18 +3,18 @@
 *.env
 !.env.example
 
-# SQLite 데이터베이스 파일 및 백업
-data/
+# SQLite 데이터베이스 파일 및 백업 (루트의 런타임 데이터만)
+/data/
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
 *.sqlite
 *.sqlite3
-backups/
+/backups/
 
 # 로그
-logs/
+/logs/
 *.log
 
 # 파이썬

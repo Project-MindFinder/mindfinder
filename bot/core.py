@@ -1,0 +1,120 @@
+"""MindFinder 봇의 핵심 클래스.
+
+discord.py 의 commands.Bot 을 확장하여
+- 설정(Settings)과 데이터베이스, 리포지토리를 보유하고
+- 코그(cog)를 로드하며
+- 종료 시 자원을 정리한다.
+"""
+
+from __future__ import annotations
+
+import logging
+
+import discord
+from discord.ext import commands
+
+from bot.config import Settings
+from bot.db.database import Database
+from bot.db.seed import seed_all
+from bot.db.repositories import (
+    AdmissionRepository,
+    AuditRepository,
+    HospitalRepository,
+    MatchChannelRepository,
+    MatchPreferenceRepository,
+    MatchRequestRepository,
+    UserRepository,
+    VerificationRepository,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class MindFinderBot(commands.Bot):
+    """MindFinder 디스코드 봇."""
+
+    def __init__(self, settings: Settings) -> None:
+        # 개인정보 보호를 위해 인텐트를 최소화한다.
+        # - guilds: 서버 정보
+        # - members: 역할 부여/조회 (인증 배지)
+        # - message_content: 위기 대응 키워드 감지에 필요 (선택적 기능)
+        intents = discord.Intents.default()
+        intents.members = True
+        intents.message_content = True
+
+        super().__init__(
+            command_prefix="!",  # 슬래시 커맨드 중심이지만 접두사 명령도 허용
+            intents=intents,
+            help_command=None,   # 자체 도움말 명령 사용
+        )
+
+        self.settings = settings
+        self.db = Database(settings.database_path)
+
+        # 리포지토리 (DB 연결 후에도 재사용 가능한 객체)
+        self.users = UserRepository(self.db)
+        self.hospitals = HospitalRepository(self.db)
+        self.admissions = AdmissionRepository(self.db)
+        self.verifications = VerificationRepository(self.db)
+        self.match_prefs = MatchPreferenceRepository(self.db)
+        self.match_requests = MatchRequestRepository(self.db)
+        self.match_channels = MatchChannelRepository(self.db)
+        self.audit = AuditRepository(self.db)
+
+    async def setup_hook(self) -> None:
+        """봇 로그인 직후 실행. DB 연결, 시드, 코그 로드."""
+        await self.db.connect()
+        await seed_all(self.db)
+        await self._load_cogs()
+        await self._sync_commands()
+
+    async def _load_cogs(self) -> None:
+        """cogs 디렉터리의 확장 모듈을 로드한다."""
+        for extension in (
+            "bot.cogs.general",
+            "bot.cogs.verification",
+            "bot.cogs.matching",
+            "bot.cogs.community",
+            "bot.cogs.crisis",
+        ):
+            try:
+                await self.load_extension(extension)
+                logger.info("코그 로드 완료: %s", extension)
+            except Exception:  # noqa: BLE001 - 개별 코그 실패가 전체를 막지 않도록
+                logger.exception("코그 로드 실패: %s", extension)
+
+    async def _sync_commands(self) -> None:
+        """슬래시 커맨드를 동기화한다.
+
+        GUILD_ID 가 설정되어 있으면 해당 길드에만 즉시 동기화(개발 편의),
+        없으면 전역 동기화(반영에 시간이 걸릴 수 있음).
+        """
+        try:
+            if self.settings.guild_id:
+                guild = discord.Object(id=self.settings.guild_id)
+                self.tree.copy_global_to(guild=guild)
+                synced = await self.tree.sync(guild=guild)
+                logger.info("길드(%s) 슬래시 커맨드 %d개 동기화", self.settings.guild_id, len(synced))
+            else:
+                synced = await self.tree.sync()
+                logger.info("전역 슬래시 커맨드 %d개 동기화", len(synced))
+        except Exception:  # noqa: BLE001
+            logger.exception("슬래시 커맨드 동기화 실패")
+
+    async def on_ready(self) -> None:
+        """봇이 준비되면 로그를 남긴다."""
+        logger.info(
+            "봇 로그인 완료: %s (ID: %s) / 길드 %d개",
+            self.user, getattr(self.user, "id", "?"), len(self.guilds),
+        )
+        await self.change_presence(
+            activity=discord.Activity(
+                type=discord.ActivityType.watching,
+                name="폐쇄병동 동료 찾기",
+            )
+        )
+
+    async def close(self) -> None:
+        """종료 시 DB 엔진을 정리하고 부모 close 를 호출한다."""
+        await self.db.dispose()
+        await super().close()

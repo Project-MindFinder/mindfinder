@@ -1,0 +1,26 @@
+# ============================================
+# MindFinder 봇 docker-compose 구성
+# - SQLite DB 와 로그를 named volume 으로 영속화
+# - .env 파일에서 환경변수 로드
+# ============================================
+services:
+  mindfinder:
+    build: .
+    image: mindfinder-bot:latest
+    container_name: mindfinder-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # 컨테이너 내부 경로 (볼륨과 일치)
+      DATABASE_PATH: /app/data/mindfinder.db
+      LOG_DIR: /app/logs
+    volumes:
+      - mindfinder-data:/app/data
+      - mindfinder-logs:/app/logs
+    # 봇은 외부 포트를 열 필요 없음
+    stop_grace_period: 15s
+
+volumes:
+  mindfinder-data:
+  mindfinder-logs:

@@ -1,0 +1,546 @@
+"""데이터 접근 함수 모음 (리포지토리 계층, SQLAlchemy ORM).
+
+ORM 쿼리를 이 파일에 모아두어 코그(cog) 코드에서는 비즈니스 로직에 집중한다.
+각 메서드는 자체 세션을 열고 커밋까지 처리한다.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+from typing import Optional, Sequence
+
+from sqlalchemy import delete, func, or_, select, update
+
+from bot.db.database import Database
+from bot.db.models import (
+    Admission,
+    AuditLog,
+    Hospital,
+    HospitalAlias,
+    MatchChannel,
+    MatchChannelMember,
+    MatchPreference,
+    MatchRequest,
+    User,
+    VerificationRequest,
+)
+
+
+def ym(year: int, month: int) -> int:
+    """연·월을 비교 가능한 정수로 변환한다. (year*12 + month-1)"""
+    return year * 12 + (month - 1)
+
+
+def _utcnow() -> datetime:
+    """시간대 미포함(naive) UTC 현재 시각을 반환한다.
+
+    DB 컬럼이 naive datetime 이므로 tzinfo 를 제거해 저장한다.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+logger = logging.getLogger(__name__)
+
+
+class UserRepository:
+    """users 테이블 접근."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def ensure_user(self, discord_id: int) -> None:
+        """사용자가 없으면 생성한다."""
+        async with self.db.session() as session:
+            user = await session.get(User, discord_id)
+            if user is None:
+                session.add(User(discord_id=discord_id))
+                await session.commit()
+
+    async def exists(self, discord_id: int) -> bool:
+        async with self.db.session() as session:
+            return await session.get(User, discord_id) is not None
+
+
+class HospitalRepository:
+    """hospitals / hospital_aliases 테이블 접근."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def get_by_name(self, name: str) -> Optional[Hospital]:
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(Hospital).where(Hospital.name == name)
+            )
+            return result.scalar_one_or_none()
+
+    async def get_by_normalized(self, normalized: str) -> Optional[Hospital]:
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(Hospital).where(Hospital.normalized_name == normalized)
+            )
+            return result.scalar_one_or_none()
+
+    async def get_by_alias(self, alias: str) -> Optional[Hospital]:
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(Hospital)
+                .join(HospitalAlias, HospitalAlias.hospital_id == Hospital.id)
+                .where(HospitalAlias.alias == alias)
+            )
+            return result.scalar_one_or_none()
+
+    async def get_by_id(self, hospital_id: int) -> Optional[Hospital]:
+        async with self.db.session() as session:
+            return await session.get(Hospital, hospital_id)
+
+    async def list_all(self) -> Sequence[Hospital]:
+        async with self.db.session() as session:
+            result = await session.execute(select(Hospital).order_by(Hospital.name))
+            return result.scalars().all()
+
+    async def create(self, name: str, normalized_name: str) -> Hospital:
+        """새 병원을 생성하고 반환한다."""
+        async with self.db.session() as session:
+            hospital = Hospital(name=name, normalized_name=normalized_name)
+            session.add(hospital)
+            await session.commit()
+            await session.refresh(hospital)
+            return hospital
+
+    async def add_alias(self, hospital_id: int, alias: str) -> None:
+        async with self.db.session() as session:
+            existing = await session.execute(
+                select(HospitalAlias).where(HospitalAlias.alias == alias)
+            )
+            if existing.scalar_one_or_none() is None:
+                session.add(HospitalAlias(hospital_id=hospital_id, alias=alias))
+                await session.commit()
+
+
+class AdmissionRepository:
+    """admissions 테이블 접근."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def add(
+        self,
+        user_id: int,
+        hospital_id: int,
+        admit_year: int,
+        admit_month: int,
+        discharge_year: Optional[int],
+        discharge_month: Optional[int],
+        is_ongoing: bool,
+    ) -> int:
+        """입원 이력을 추가하고 id 를 반환한다."""
+        async with self.db.session() as session:
+            admission = Admission(
+                user_id=user_id,
+                hospital_id=hospital_id,
+                admit_year=admit_year,
+                admit_month=admit_month,
+                discharge_year=discharge_year,
+                discharge_month=discharge_month,
+                is_ongoing=is_ongoing,
+                admit_ym=ym(admit_year, admit_month),
+                discharge_ym=None if is_ongoing else ym(discharge_year, discharge_month),
+                verification="self_reported",
+            )
+            session.add(admission)
+            await session.commit()
+            await session.refresh(admission)
+            return admission.id
+
+    async def list_by_user(self, user_id: int) -> Sequence[Admission]:
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(Admission)
+                .where(Admission.user_id == user_id)
+                .order_by(Admission.admit_ym.desc())
+            )
+            return result.scalars().all()
+
+    async def get_by_id(self, admission_id: int) -> Optional[Admission]:
+        async with self.db.session() as session:
+            return await session.get(Admission, admission_id)
+
+    async def update(
+        self,
+        admission_id: int,
+        hospital_id: int,
+        admit_year: int,
+        admit_month: int,
+        discharge_year: Optional[int],
+        discharge_month: Optional[int],
+        is_ongoing: bool,
+    ) -> None:
+        async with self.db.session() as session:
+            await session.execute(
+                update(Admission)
+                .where(Admission.id == admission_id)
+                .values(
+                    hospital_id=hospital_id,
+                    admit_year=admit_year,
+                    admit_month=admit_month,
+                    discharge_year=discharge_year,
+                    discharge_month=discharge_month,
+                    is_ongoing=is_ongoing,
+                    admit_ym=ym(admit_year, admit_month),
+                    discharge_ym=(
+                        None if is_ongoing else ym(discharge_year, discharge_month)
+                    ),
+                )
+            )
+            await session.commit()
+
+    async def delete(self, admission_id: int) -> None:
+        async with self.db.session() as session:
+            await session.execute(
+                delete(Admission).where(Admission.id == admission_id)
+            )
+            await session.commit()
+
+    async def set_verification(self, admission_id: int, status: str) -> None:
+        async with self.db.session() as session:
+            await session.execute(
+                update(Admission)
+                .where(Admission.id == admission_id)
+                .values(verification=status)
+            )
+            await session.commit()
+
+    async def find_overlapping(
+        self,
+        hospital_id: int,
+        admit_ym_val: int,
+        discharge_ym_val: Optional[int],
+        exclude_user_id: Optional[int] = None,
+    ) -> Sequence[Admission]:
+        """같은 병원에서 기간이 겹치는 다른 사용자의 입원 이력을 찾는다.
+
+        겹침 조건 (양끝 포함):  A.start <= B.end  AND  B.start <= A.end
+        입원 중(discharge_ym IS NULL)은 끝이 무한대로 취급한다.
+        """
+        end = discharge_ym_val if discharge_ym_val is not None else 10**9
+        stmt = select(Admission).where(
+            Admission.hospital_id == hospital_id,
+            Admission.admit_ym <= end,
+            or_(
+                Admission.discharge_ym.is_(None),
+                Admission.discharge_ym >= admit_ym_val,
+            ),
+        )
+        if exclude_user_id is not None:
+            stmt = stmt.where(Admission.user_id != exclude_user_id)
+        stmt = stmt.order_by(Admission.admit_ym)
+        async with self.db.session() as session:
+            result = await session.execute(stmt)
+            return result.scalars().all()
+
+
+class VerificationRepository:
+    """verification_requests 테이블 접근."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def create(self, user_id: int, admission_id: Optional[int]) -> int:
+        async with self.db.session() as session:
+            request = VerificationRequest(user_id=user_id, admission_id=admission_id)
+            session.add(request)
+            await session.commit()
+            await session.refresh(request)
+            return request.id
+
+    async def set_proof_message(
+        self, request_id: int, channel_id: int, message_id: int
+    ) -> None:
+        async with self.db.session() as session:
+            await session.execute(
+                update(VerificationRequest)
+                .where(VerificationRequest.id == request_id)
+                .values(proof_channel_id=channel_id, proof_message_id=message_id)
+            )
+            await session.commit()
+
+    async def get_by_id(self, request_id: int) -> Optional[VerificationRequest]:
+        async with self.db.session() as session:
+            return await session.get(VerificationRequest, request_id)
+
+    async def list_pending(self) -> Sequence[VerificationRequest]:
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(VerificationRequest)
+                .where(VerificationRequest.status == "pending")
+                .order_by(VerificationRequest.created_at)
+            )
+            return result.scalars().all()
+
+    async def resolve(
+        self,
+        request_id: int,
+        status: str,
+        reviewer_id: int,
+        note: Optional[str] = None,
+    ) -> None:
+        async with self.db.session() as session:
+            await session.execute(
+                update(VerificationRequest)
+                .where(VerificationRequest.id == request_id)
+                .values(
+                    status=status,
+                    reviewer_id=reviewer_id,
+                    note=note,
+                    reviewed_at=_utcnow(),
+                )
+            )
+            await session.commit()
+
+    async def list_by_user(self, user_id: int) -> Sequence[VerificationRequest]:
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(VerificationRequest)
+                .where(VerificationRequest.user_id == user_id)
+                .order_by(VerificationRequest.created_at.desc())
+            )
+            return result.scalars().all()
+
+
+class MatchPreferenceRepository:
+    """match_preferences 테이블 접근."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def set_enabled(self, user_id: int, enabled: bool) -> None:
+        async with self.db.session() as session:
+            pref = await session.get(MatchPreference, user_id)
+            if pref is None:
+                session.add(MatchPreference(user_id=user_id, enabled=enabled))
+            else:
+                pref.enabled = enabled
+            await session.commit()
+
+    async def is_enabled(self, user_id: int) -> bool:
+        async with self.db.session() as session:
+            pref = await session.get(MatchPreference, user_id)
+            return bool(pref.enabled) if pref else False
+
+
+class MatchRequestRepository:
+    """match_requests 테이블 접근."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def create(
+        self, requester_id: int, target_id: int, admission_id: Optional[int]
+    ) -> int:
+        async with self.db.session() as session:
+            request = MatchRequest(
+                requester_id=requester_id,
+                target_id=target_id,
+                admission_id=admission_id,
+            )
+            session.add(request)
+            await session.commit()
+            await session.refresh(request)
+            return request.id
+
+    async def get_by_id(self, request_id: int) -> Optional[MatchRequest]:
+        async with self.db.session() as session:
+            return await session.get(MatchRequest, request_id)
+
+    async def find_pending_between(
+        self, user_a: int, user_b: int
+    ) -> Optional[MatchRequest]:
+        """두 사용자 사이에 이미 대기 중인 매칭 신청이 있는지 확인한다."""
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(MatchRequest).where(
+                    MatchRequest.status == "pending",
+                    or_(
+                        (MatchRequest.requester_id == user_a)
+                        & (MatchRequest.target_id == user_b),
+                        (MatchRequest.requester_id == user_b)
+                        & (MatchRequest.target_id == user_a),
+                    ),
+                )
+            )
+            return result.scalars().first()
+
+    async def resolve(self, request_id: int, status: str) -> None:
+        async with self.db.session() as session:
+            await session.execute(
+                update(MatchRequest)
+                .where(MatchRequest.id == request_id)
+                .values(status=status, responded_at=_utcnow())
+            )
+            await session.commit()
+
+    async def list_incoming_pending(self, target_id: int) -> Sequence[MatchRequest]:
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(MatchRequest)
+                .where(
+                    MatchRequest.target_id == target_id,
+                    MatchRequest.status == "pending",
+                )
+                .order_by(MatchRequest.created_at)
+            )
+            return result.scalars().all()
+
+
+class MatchChannelRepository:
+    """match_channels / match_channel_members 테이블 접근."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def create(
+        self,
+        discord_channel_id: int,
+        guild_id: int,
+        hospital_id: Optional[int],
+        member_ids: Sequence[int],
+    ) -> int:
+        """새 매칭 채널을 등록하고 id 를 반환한다."""
+        async with self.db.session() as session:
+            channel = MatchChannel(
+                discord_channel_id=discord_channel_id,
+                guild_id=guild_id,
+                hospital_id=hospital_id,
+            )
+            session.add(channel)
+            await session.flush()
+            for user_id in dict.fromkeys(member_ids):  # 중복 제거, 순서 유지
+                session.add(
+                    MatchChannelMember(match_channel_id=channel.id, user_id=user_id)
+                )
+            await session.commit()
+            await session.refresh(channel)
+            return channel.id
+
+    async def get_by_id(self, match_channel_id: int) -> Optional[MatchChannel]:
+        async with self.db.session() as session:
+            return await session.get(MatchChannel, match_channel_id)
+
+    async def get_by_discord_id(
+        self, discord_channel_id: int
+    ) -> Optional[MatchChannel]:
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(MatchChannel).where(
+                    MatchChannel.discord_channel_id == discord_channel_id
+                )
+            )
+            return result.scalar_one_or_none()
+
+    async def find_open_for_users(
+        self, user_ids: Sequence[int], hospital_id: Optional[int] = None
+    ) -> Optional[MatchChannel]:
+        """주어진 사용자들이 모두 참여 중인 열린 채널을 찾는다.
+
+        여러 명이 한 채널을 공유하는 흐름에서, 이미 함께 있는 채널이 있으면
+        새로 만들지 않고 재사용하기 위해 사용한다.
+        """
+        wanted = list(dict.fromkeys(user_ids))
+        if not wanted:
+            return None
+        async with self.db.session() as session:
+            stmt = (
+                select(MatchChannel)
+                .join(
+                    MatchChannelMember,
+                    MatchChannelMember.match_channel_id == MatchChannel.id,
+                )
+                .where(
+                    MatchChannel.status == "open",
+                    MatchChannelMember.user_id.in_(wanted),
+                )
+                .group_by(MatchChannel.id)
+                .having(
+                    func.count(func.distinct(MatchChannelMember.user_id)) == len(wanted)
+                )
+            )
+            if hospital_id is not None:
+                stmt = stmt.where(MatchChannel.hospital_id == hospital_id)
+            result = await session.execute(stmt)
+            return result.scalars().first()
+
+    async def list_open_for_user(self, user_id: int) -> Sequence[MatchChannel]:
+        """사용자가 참여 중인 열린 매칭 채널 목록."""
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(MatchChannel)
+                .join(
+                    MatchChannelMember,
+                    MatchChannelMember.match_channel_id == MatchChannel.id,
+                )
+                .where(
+                    MatchChannel.status == "open",
+                    MatchChannelMember.user_id == user_id,
+                )
+                .order_by(MatchChannel.created_at)
+            )
+            return result.scalars().all()
+
+    async def list_members(self, match_channel_id: int) -> Sequence[int]:
+        """채널 참여자 user_id 목록."""
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(MatchChannelMember.user_id).where(
+                    MatchChannelMember.match_channel_id == match_channel_id
+                )
+            )
+            return list(result.scalars().all())
+
+    async def add_member(self, match_channel_id: int, user_id: int) -> None:
+        """채널에 참여자를 추가한다 (이미 있으면 무시)."""
+        async with self.db.session() as session:
+            existing = await session.execute(
+                select(MatchChannelMember).where(
+                    MatchChannelMember.match_channel_id == match_channel_id,
+                    MatchChannelMember.user_id == user_id,
+                )
+            )
+            if existing.scalar_one_or_none() is None:
+                session.add(
+                    MatchChannelMember(
+                        match_channel_id=match_channel_id, user_id=user_id
+                    )
+                )
+                await session.commit()
+
+    async def close(self, match_channel_id: int) -> None:
+        """채널을 닫힘 상태로 표시한다."""
+        async with self.db.session() as session:
+            await session.execute(
+                update(MatchChannel)
+                .where(MatchChannel.id == match_channel_id)
+                .values(status="closed", closed_at=_utcnow())
+            )
+            await session.commit()
+
+
+class AuditRepository:
+    """audit_logs 테이블 접근."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def log(
+        self,
+        action: str,
+        actor_id: Optional[int] = None,
+        target: Optional[str] = None,
+        detail: Optional[str] = None,
+    ) -> None:
+        async with self.db.session() as session:
+            session.add(
+                AuditLog(action=action, actor_id=actor_id, target=target, detail=detail)
+            )
+            await session.commit()

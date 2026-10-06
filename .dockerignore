@@ -1,0 +1,32 @@
+# 버전관리/에디터
+.git
+.gitignore
+.vscode
+.idea
+
+# 환경변수/비밀값 (이미지에 절대 포함 금지)
+.env
+*.env
+!.env.example
+
+# 데이터/로그/백업
+data/
+logs/
+backups/
+*.db
+*.sqlite*
+
+# 파이썬 캐시/가상환경
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 테스트/문서 (런타임 불필요)
+tests/
+docs/
+*.md
+!README.md

@@ -45,6 +45,8 @@ class Settings:
     verified_role_id: int | None = None
     verification_channel_id: int | None = None
     crisis_channel_id: int | None = None
+    # 매칭 채널을 생성할 카테고리 ID (선택)
+    match_category_id: int | None = None
 
     # --- 경로 ---
     database_path: Path = field(default_factory=lambda: BASE_DIR / "data" / "mindfinder.db")
@@ -98,6 +100,7 @@ def load_settings(env_file: str | os.PathLike[str] | None = None) -> Settings:
         verified_role_id=_get_int("VERIFIED_ROLE_ID"),
         verification_channel_id=_get_int("VERIFICATION_CHANNEL_ID"),
         crisis_channel_id=_get_int("CRISIS_CHANNEL_ID"),
+        match_category_id=_get_int("MATCH_CATEGORY_ID"),
         database_path=_resolve_path(
             os.getenv("DATABASE_PATH", ""), BASE_DIR / "data" / "mindfinder.db"
         ),
