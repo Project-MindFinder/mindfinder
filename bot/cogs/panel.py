@@ -1197,7 +1197,7 @@ class OtherVerifyReviewView(discord.ui.View):
             if adm is not None and adm.hospital is not None:
                 hospital_name = adm.hospital.name
 
-        # 2단계 역할 + 병원 역할/채널 + 기간 스레드 부여
+        # 2단계 역할 + 병원 역할/카테고리 + 기간 채널 부여
         if interaction.guild is not None:
             shim = _ResultShim(hospital_name) if hospital_name else None
             await grant_verified_access(
@@ -1662,6 +1662,10 @@ class VerifyPanelView(discord.ui.View):
             custom_id="mf:v_action",
             options=[
                 discord.SelectOption(
+                    label="입원 이력 등록", value="admission", emoji="🏥",
+                    description="병원·기간을 입력해 입원 이력을 등록(임시인증)",
+                ),
+                discord.SelectOption(
                     label="서류 인증", value="verify", emoji="📄",
                     description="병원을 고른 뒤 서류·기간으로 2단계 인증",
                 ),
@@ -1690,6 +1694,7 @@ class VerifyPanelView(discord.ui.View):
             )
             return
         handler = {
+            "admission": self._do_admission,
             "verify": self._do_verify,
             "knowledge": self._do_knowledge,
             "other": self._do_other,
@@ -1701,6 +1706,22 @@ class VerifyPanelView(discord.ui.View):
             )
             return
         await handler(interaction)
+
+    async def _do_admission(self, interaction: discord.Interaction) -> None:
+        """입원 이력을 자기 신고로 등록한다 (병원·기간 선택 → 임시인증)."""
+        async def _proceed(inner: discord.Interaction) -> None:
+            view = await HospitalChooseView(
+                self.bot, self.vservice, "admission"
+            ).load()
+            await inner.response.send_message(
+                "입원 이력을 등록할 **병원을 선택**하세요.",
+                view=view,
+                ephemeral=True,
+            )
+
+        if not await ensure_consent(self.bot, interaction, _proceed):
+            return
+        await _proceed(interaction)
 
     async def _do_verify(self, interaction: discord.Interaction) -> None:
         async def _proceed(inner: discord.Interaction) -> None:
@@ -1810,6 +1831,69 @@ class VerifyPanelView(discord.ui.View):
         if not await ensure_consent(self.bot, interaction, _proceed):
             return
         await _proceed(interaction)
+
+# --------------------------------------------------------------------------- #
+# 매칭 채널 닫기 (동적, 비영구)
+# --------------------------------------------------------------------------- #
+class MatchChannelCloseView(discord.ui.View):
+    """내가 참여 중인 매칭 채널 중 하나를 골라 닫는다."""
+
+    def __init__(
+        self, bot: MindFinderBot, user_id: int, channels: list
+    ) -> None:
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.user_id = user_id
+        options = [
+            discord.SelectOption(
+                label=(ch.name or "매칭 채널")[:100],
+                value=str(ch.id),
+                description="이 채널을 닫습니다 (기록 보존)",
+            )
+            for ch in channels[:25]
+        ]
+        select: discord.ui.Select = discord.ui.Select(
+            placeholder="닫을 매칭 채널을 선택하세요", options=options
+        )
+        select.callback = self._on_select  # type: ignore[method-assign]
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "본인의 매칭 채널만 닫을 수 있습니다.", ephemeral=True
+            )
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "서버에서만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+        values = interaction.data.get("values", []) if interaction.data else []
+        if not values:
+            await interaction.response.send_message(
+                "선택이 취소되었습니다.", ephemeral=True
+            )
+            return
+        channel = interaction.guild.get_channel(int(values[0]))
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "채널을 찾을 수 없습니다.", ephemeral=True
+            )
+            return
+        ok = await self.bot.matching_service.close_channel(
+            interaction.guild, interaction.user.id, channel
+        )
+        if not ok:
+            await interaction.response.send_message(
+                "이 매칭 채널의 참여자만 닫을 수 있습니다.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            f"🔒 {channel.mention} 매칭 채널을 닫았습니다. (기록은 보존됩니다.)",
+            ephemeral=True,
+        )
+
 
 # --------------------------------------------------------------------------- #
 # 매칭 패널 (영구 뷰) — 🧩-매칭 채널
@@ -1957,6 +2041,33 @@ class MatchPanelView(discord.ui.View):
         for ch in chans:
             embed.add_field(name=ch.name, value=ch.mention, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(
+        label="매칭 채널 닫기", style=discord.ButtonStyle.danger,
+        custom_id="mf:m_close", row=3,
+    )
+    async def close_channel(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """내가 참여 중인 매칭 채널을 골라 닫는다 (읽기 전용 전환, 기록 보존)."""
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "서버에서만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+        chans = await self.mservice.my_open_channels(
+            interaction.guild, interaction.user.id
+        )
+        if not chans:
+            await interaction.response.send_message(
+                "닫을 매칭 채널이 없습니다.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            "닫을 **매칭 채널을 선택**하세요. (기록은 보존되고 채팅만 막힙니다.)",
+            view=MatchChannelCloseView(self.bot, interaction.user.id, chans),
+            ephemeral=True,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -2200,13 +2311,13 @@ class CommunityPanelView(discord.ui.View):
             )
 
     @discord.ui.button(
-        label="내 기간 스레드", style=discord.ButtonStyle.primary,
+        label="내 기간 채널", style=discord.ButtonStyle.primary,
         custom_id="mf:c_threads", row=0,
     )
     async def my_threads(
         self, interaction: discord.Interaction, _button: discord.ui.Button
     ) -> None:
-        """내 인증 이력(병원·기간)에 맞는 비공개 월 스레드를 확보/표시한다."""
+        """내 인증 이력(병원·기간)에 맞는 비공개 월 채널을 확보/표시한다."""
         if interaction.guild is None:
             await interaction.response.send_message(
                 "서버에서만 사용할 수 있습니다.", ephemeral=True
@@ -2221,12 +2332,11 @@ class CommunityPanelView(discord.ui.View):
             logger.exception("커뮤니티 접근 동기화 실패: user=%s", interaction.user.id)
 
         admissions = await self.bot.admissions.list_by_user(interaction.user.id)
-        member = interaction.guild.get_member(interaction.user.id)
         embed = discord.Embed(
             title="🏥 내 병원·기간 커뮤니티",
             description=(
                 "**인증(서류·지식)을 마친** 병원의, 내 입원 기간에 해당하는 "
-                "**비공개 월 스레드**가 자동으로 열립니다.\n"
+                "**비공개 월 채널**이 자동으로 열립니다.\n"
                 "같은 기간에 입원했던 인증자에게만 그 방이 보입니다."
             ),
             color=discord.Color.teal(),
@@ -2238,18 +2348,16 @@ class CommunityPanelView(discord.ui.View):
                 continue
             labels: list[str] = []
             for ym_value in self.bot.channel_service.months_for_admission(adm):
-                thread = await self.bot.channel_service.ensure_period_thread(
+                channel = await self.bot.channel_service.ensure_period_channel(
                     interaction.guild,
                     adm.hospital_id,
                     adm.hospital.name,
-                    format_ym(ym_value),
-                    private=True,
+                    ym_value,
+                    with_role=True,
                 )
-                if thread is None:
+                if channel is None:
                     continue
-                if member is not None:
-                    await self.bot.channel_service.add_member_to_thread(thread, member)
-                labels.append(thread.mention)
+                labels.append(channel.mention)
             if labels:
                 found = True
                 embed.add_field(
@@ -2259,10 +2367,10 @@ class CommunityPanelView(discord.ui.View):
                 )
         if not found:
             embed.add_field(
-                name="표시할 기간 스레드 없음",
+                name="표시할 기간 채널 없음",
                 value=(
                     "먼저 **서류 인증 또는 지식기반 인증**을 완료하세요. "
-                    "인증이 완료되면 해당 병원·기간 스레드가 자동으로 열립니다."
+                    "인증이 완료되면 해당 병원·기간 채널이 자동으로 열립니다."
                 ),
                 inline=False,
             )
@@ -2279,9 +2387,9 @@ class CommunityPanelView(discord.ui.View):
         embed = discord.Embed(
             title="🏥 병원별 커뮤니티 안내",
             description=(
-                "서류 인증을 받으면 **내가 인증받은 병원**의 전용 채널이 열립니다.\n"
-                "그 안에 **월 단위 비공개 스레드**가 생기고, "
-                "내 입원 기간에 해당하는 스레드에만 참여됩니다."
+                "서류 인증을 받으면 **내가 인증받은 병원**의 전용 카테고리가 열립니다.\n"
+                "그 안에 **월 단위 비공개 채널**이 생기고, "
+                "내 입원 기간에 해당하는 채널에만 참여됩니다."
             ),
             color=discord.Color.teal(),
         )
@@ -2372,6 +2480,7 @@ class HelpPanelView(discord.ui.View):
         embed.add_field(
             name="🔐 인증",
             value=(
+                "**입원 이력 등록** — 병원·기간을 입력해 임시인증(자기 신고)\n"
                 "**서류 인증** — 병원 선택 후 서류로 2단계 인증\n"
                 "**기타 방법 인증** — 서류 외 방법으로 관리자 승인 요청\n"
                 "**기타 병원 직접 입력** — 목록에 없는 병원 등록 요청"
@@ -2381,7 +2490,7 @@ class HelpPanelView(discord.ui.View):
         embed.add_field(
             name="💬 커뮤니티·지식",
             value=(
-                "**내 기간 스레드** — 내 인증 기간 커뮤니티 확인\n"
+                "**내 기간 채널** — 내 인증 기간 커뮤니티 확인\n"
                 "**지식기반 인증하기** — 동료에게 병동 경험 질문\n"
                 "**지식기반 인증 현황** — 보낸 질문 응답/판정 확인\n"
                 "**공개 범위 설정** — 병원만/기간까지/비공개"
@@ -2481,7 +2590,7 @@ class HelpPanelView(discord.ui.View):
                 match_lines.append("내 채널: " + ", ".join(c.mention for c in chans))
         embed.add_field(name="매칭", value="\n".join(match_lines)[:1024], inline=False)
 
-        # 참여 중인 병원·기간 커뮤니티(스레드) 목록 — 병원별로 묶어서 보여준다.
+        # 참여 중인 병원·기간 커뮤니티(채널) 목록 — 병원별로 묶어서 보여준다.
         if interaction.guild is not None and admissions:
             by_hospital: dict[str, list[str]] = {}
             for adm in admissions:
@@ -2862,12 +2971,12 @@ async def grant_verified_access(
     except Exception:  # noqa: BLE001
         logger.exception("병원 채널 확보 실패: hospital=%s", hospital.id)
 
-    # 인증이 끝나면 **자동으로** 내 입원 기간에 맞는 비공개 스레드를 열고 초대한다.
+    # 인증이 끝나면 **자동으로** 내 입원 기간에 맞는 비공개 기간 채널을 연다.
     # (같은 기간에 입원했던 인증자에게만 그 방이 보인다.)
     try:
         await bot.channel_service.ensure_community_access(guild, user_id)
     except Exception:  # noqa: BLE001
-        logger.exception("인증 후 기간 스레드 자동 생성 실패: user=%s", user_id)
+        logger.exception("인증 후 기간 채널 자동 생성 실패: user=%s", user_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -3198,7 +3307,8 @@ class PanelCog(commands.Cog):
             value=(
                 "1) **매칭 희망 켜기**\n"
                 "2) **동료 찾기** → 후보에게 신청\n"
-                "3) 상대가 **수락**하면 비공개 채널 개설"
+                "3) 상대가 **수락**하면 비공개 채널 개설\n"
+                "4) 대화가 끝나면 **매칭 채널 닫기** 로 정리 (기록 보존)"
             ),
             inline=False,
         )
@@ -3210,8 +3320,8 @@ class PanelCog(commands.Cog):
             title="💬 전체 커뮤니티",
             description=(
                 "**임시인증**(자기 신고) 이상이면 이용할 수 있는 전체 커뮤니티입니다.\n"
-                "**인증됨**(서류·지식 인증)을 받은 뒤 **‘병원 역할 선택’** 으로 "
-                "참여할 병원을 고르면 **병원·기간 커뮤니티**가 열립니다."
+                "**인증됨**(서류·지식 인증)을 받으면 인증한 병원의 "
+                "**병원·기간 커뮤니티**(월 단위 비공개 채널)가 자동으로 열립니다."
             ),
             color=discord.Color.teal(),
         )
@@ -3233,7 +3343,7 @@ class PanelCog(commands.Cog):
                 "🔐 **인증** — 이력 등록·서류 인증\n"
                 "🧩 **매칭** — 동료 찾기 (인증됨)\n"
                 "💬 **전체 커뮤니티** — 임시인증 이상\n"
-                "🏥 **병원-커뮤니티** — 병원 역할 선택 후 병원·기간별"
+                "🏥 **병원 카테고리** — 인증한 병원의 월 단위 비공개 기간 채널"
             ),
             inline=False,
         )
