@@ -13,9 +13,13 @@ import pytest
 from bot.config import Settings
 from bot.db.database import Database
 from bot.db.repositories import (
+    AdmissionRepository,
     HospitalRepository,
+    KnowledgeVerificationRepository,
     ManagedChannelRepository,
     ManagedRoleRepository,
+    UserRepository,
+    ym,
 )
 from bot.services.access_control import AccessControlService
 from bot.services.channels import (
@@ -38,13 +42,23 @@ class FakeRole:
         self.name = name
 
 
+class FakeMember:
+    def __init__(self, user_id: int) -> None:
+        self.id = user_id
+
+
 class FakeThread:
     def __init__(self, name: str) -> None:
+        self.id = id(self)
         self.name = name
         self.sent: list[str] = []
+        self.members: list[int] = []
 
     async def send(self, content: str) -> None:
         self.sent.append(content)
+
+    async def add_user(self, member) -> None:  # noqa: ANN001
+        self.members.append(member.id)
 
 
 class FakeTextChannel:
@@ -62,6 +76,11 @@ class FakeTextChannel:
         thread = FakeThread(name)
         self.threads.append(thread)
         return thread
+
+    async def archived_threads(self, private: bool = False, limit: int = 50):  # noqa: ANN201
+        """보관 스레드 조회 대역 (테스트에서는 비어 있음)."""
+        for _ in ():
+            yield _
 
 
 class FakeCategory:
@@ -104,7 +123,7 @@ class FakeGuild:
         return None
 
     def get_member(self, user_id: int):
-        return object()
+        return FakeMember(user_id)
 
     async def create_category(self, name: str, reason=None) -> FakeCategory:  # noqa: ANN001
         category = FakeCategory(self._next_id(), name)
@@ -133,7 +152,10 @@ class FakeBot:
     def __init__(self, db: Database, settings: Settings) -> None:
         self.db = db
         self.settings = settings
+        self.users = UserRepository(db)
         self.hospitals = HospitalRepository(db)
+        self.admissions = AdmissionRepository(db)
+        self.knowledge = KnowledgeVerificationRepository(db)
         self.managed_roles = ManagedRoleRepository(db)
         self.managed_channels = ManagedChannelRepository(db)
         self.access = AccessControlService(self)  # type: ignore[arg-type]
@@ -255,3 +277,71 @@ async def test_period_thread_created_and_reused(
         guild, hospital.id, hospital.name, "2020년 3월 ~ 2020년 5월"  # type: ignore[arg-type]
     )
     assert again is thread
+
+
+def test_months_for_admission_includes_both_ends() -> None:
+    class _Adm:
+        def __init__(self, start: int, end: Optional[int]) -> None:
+            self.admit_ym = start
+            self.discharge_ym = end
+
+    months = ChannelService.months_for_admission(
+        _Adm(ym(2020, 3), ym(2020, 5))
+    )
+    assert months == [ym(2020, 3), ym(2020, 4), ym(2020, 5)]
+
+    # 진행 중(None)이면 시작월을 포함해야 한다.
+    ongoing = ChannelService.months_for_admission(_Adm(ym(2020, 3), None))
+    assert ongoing[0] == ym(2020, 3)
+    assert len(ongoing) >= 1
+
+
+async def test_ensure_community_access_only_verified_periods(
+    service: ChannelService, bot: FakeBot
+) -> None:
+    await bot.users.ensure_user(1)
+    hospital = await bot.hospitals.create("서울대학교병원", "서울대학교병원")
+    child = await bot.hospitals.create("서울대학교어린이병원", "서울대학교어린이병원")
+
+    # 2020년 3월 한 달 입원(검증 완료)
+    adm_id = await bot.admissions.add(
+        user_id=1,
+        hospital_id=hospital.id,
+        admit_year=2020,
+        admit_month=3,
+        discharge_year=2020,
+        discharge_month=3,
+        is_ongoing=False,
+    )
+    await bot.admissions.set_verification(adm_id, "verified")
+    # 미인증(자기 신고) 이력 — 스레드가 생기면 안 된다.
+    await bot.admissions.add(
+        user_id=1,
+        hospital_id=child.id,
+        admit_year=2021,
+        admit_month=1,
+        discharge_year=2021,
+        discharge_month=1,
+        is_ongoing=False,
+    )
+
+    guild = FakeGuild()
+    await service.ensure_community_access(guild, 1)  # type: ignore[arg-type]
+
+    thread_names = [t.name for c in guild.text_channels for t in c.threads]
+    assert "2020년 3월" in thread_names
+    assert "2021년 1월" not in thread_names
+
+    # 검증된 병원 스레드에는 사용자가 추가되어 있어야 한다.
+    main_channel = next(
+        c for c in guild.text_channels if c.name.endswith("서울대학교병원")
+    )
+    assert main_channel.threads
+    assert 1 in main_channel.threads[0].members
+
+    # 미인증 병원(어린이병원)에는 기간 스레드가 만들어지지 않아야 한다.
+    child_channel = next(
+        (c for c in guild.text_channels if c.name.endswith("서울대학교어린이병원")),
+        None,
+    )
+    assert child_channel is None or child_channel.threads == []

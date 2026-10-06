@@ -264,9 +264,21 @@ class ChannelService:
         if channel is None:
             return None
         thread_name = _clip(period_text)
+        # 활성 스레드에서 먼저 찾는다.
         for thread in channel.threads:
             if thread.name == thread_name:
                 return thread
+        # 보관(archived)된 비공개 스레드도 재사용한다 (중복 생성 방지).
+        archived = getattr(channel, "archived_threads", None)
+        if archived is not None:
+            try:
+                async for thread in archived(private=True, limit=100):
+                    if thread.name == thread_name:
+                        return thread
+            except (discord.Forbidden, discord.HTTPException):
+                logger.debug(
+                    "보관 스레드 조회 실패: channel=%s", getattr(channel, "id", None)
+                )
         thread_type = (
             discord.ChannelType.private_thread
             if private

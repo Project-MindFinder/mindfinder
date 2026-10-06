@@ -37,7 +37,7 @@ from bot.services.matching import Candidate, MatchingService
 from bot.services.verification import VERIFICATION_LABEL, VerificationService
 from bot.ui.consent import build_consent_embed, ensure_consent
 from bot.utils.hospitals import hospital_display_name, normalize_name
-from bot.utils.periods import PeriodError, parse_period_input
+from bot.utils.periods import PeriodError, format_ym, parse_period_input
 
 logger = logging.getLogger(__name__)
 
@@ -881,14 +881,84 @@ class MatchPanelView(discord.ui.View):
 # 커뮤니티 패널 (영구 뷰) — 💬-전체-커뮤니티 채널
 # --------------------------------------------------------------------------- #
 class CommunityPanelView(discord.ui.View):
-    """커뮤니티 안내 패널: 병원별 채널/기간 스레드 안내."""
+    """커뮤니티 안내 패널: 전체 커뮤니티 / 병원·기간 스레드."""
 
     def __init__(self, bot: MindFinderBot) -> None:
         super().__init__(timeout=None)
         self.bot = bot
 
     @discord.ui.button(
-        label="병원별 채널 안내", style=discord.ButtonStyle.primary,
+        label="내 기간 스레드", style=discord.ButtonStyle.primary,
+        custom_id="mf:c_threads", row=0,
+    )
+    async def my_threads(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """내 인증 이력(병원·기간)에 맞는 비공개 월 스레드를 확보/표시한다."""
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "서버에서만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await self.bot.channel_service.ensure_community_access(
+                interaction.guild, interaction.user.id
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("커뮤니티 접근 동기화 실패: user=%s", interaction.user.id)
+
+        admissions = await self.bot.admissions.list_by_user(interaction.user.id)
+        verified_ids = set(
+            await self.bot.access.verified_hospital_ids(interaction.user.id)
+        )
+        member = interaction.guild.get_member(interaction.user.id)
+        embed = discord.Embed(
+            title="🏥 내 병원·기간 커뮤니티",
+            description=(
+                "서류 인증(2단계)을 마친 병원의, 내 입원 기간에 해당하는 "
+                "**비공개 월 스레드**만 표시됩니다."
+            ),
+            color=discord.Color.teal(),
+        )
+        found = False
+        for adm in admissions:
+            if adm.hospital_id not in verified_ids:
+                continue
+            labels: list[str] = []
+            for ym_value in self.bot.channel_service.months_for_admission(adm):
+                thread = await self.bot.channel_service.ensure_period_thread(
+                    interaction.guild,
+                    adm.hospital_id,
+                    adm.hospital.name,
+                    format_ym(ym_value),
+                    private=True,
+                )
+                if thread is None:
+                    continue
+                if member is not None:
+                    await self.bot.channel_service.add_member_to_thread(thread, member)
+                labels.append(thread.mention)
+            if labels:
+                found = True
+                embed.add_field(
+                    name=hospital_display_name(adm.hospital.name),
+                    value=" · ".join(labels[:25]),
+                    inline=False,
+                )
+        if not found:
+            embed.add_field(
+                name="표시할 기간 스레드 없음",
+                value=(
+                    "‘서류 인증 (2단계)’를 완료한 병원의 이력이 있어야 "
+                    "병원·기간 커뮤니티가 열립니다."
+                ),
+                inline=False,
+            )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(
+        label="병원별 안내", style=discord.ButtonStyle.secondary,
         custom_id="mf:c_hospital", row=0,
     )
     async def hospital_guide(
@@ -899,11 +969,15 @@ class CommunityPanelView(discord.ui.View):
             title="🏥 병원별 커뮤니티 안내",
             description=(
                 "서류 인증을 받으면 **내가 인증받은 병원**의 전용 채널이 열립니다.\n"
-                "같은 시기(입원 기간)에 입원했던 분들과 이야기할 수 있습니다."
+                "그 안에 **월 단위 비공개 스레드**가 생기고, "
+                "내 입원 기간에 해당하는 스레드에만 참여됩니다."
             ),
             color=discord.Color.teal(),
         )
-        names = ", ".join(h.name for h in hospitals[:20]) or "아직 등록된 병원이 없습니다."
+        names = (
+            ", ".join(h.name for h in hospitals[:20])
+            or "아직 등록된 병원이 없습니다."
+        )
         embed.add_field(name="등록된 병원", value=names, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
