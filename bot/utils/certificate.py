@@ -247,8 +247,31 @@ def parse_certificate_text(text: str) -> ParsedCertificate:
     departments = _extract_departments(text)
     psych_departments = psychiatric_departments(departments)
 
-    years = sorted({int(y) for y in _YEAR_RE.findall(text)})
-    month_days = [(int(m), int(d)) for m, d in _MONTH_DAY_RE.findall(text)]
+    # '년 MM월 DD일' / 'MM월 DD일' 를 연도와 함께 뽑는다.
+    dated: list[tuple[int, int, int]] = []  # (year, month, day)
+    for y, m, d in _MONTH_DAY_ALT_RE.findall(text):
+        mm, dd = int(m), int(d)
+        if 1 <= mm <= 12 and 1 <= dd <= 31:
+            dated.append((int(y) if y else 0, mm, dd))
+    month_days = [(m, d) for _y, m, d in dated]
+    if not month_days:
+        month_days = [(int(m), int(d)) for m, d in _MONTH_DAY_RE.findall(text)]
+
+    explicit_years = sorted({y for y, _m, _d in dated if y})
+    years = explicit_years or sorted({int(y) for y in _YEAR_RE.findall(text)})
+
+    # '~' 로 표시된 줄에서 기간 월을 모은다 (실제 입원 기간).
+    period_months: list[int] = []
+    for line in text.splitlines():
+        if "~" not in line:
+            continue
+        for m, _d in _MONTH_DAY_RE.findall(line):
+            mi = int(m)
+            if 1 <= mi <= 12 and mi not in period_months:
+                period_months.append(mi)
+    # '~' 줄에서 못 찾으면, 연도가 명시된 날짜의 월을 기간 후보로 사용한다.
+    if not period_months and explicit_years:
+        period_months = [m for _y, m, _d in dated if _y]
 
     return ParsedCertificate(
         document_no=doc_match.group(1) if doc_match else None,
@@ -260,6 +283,7 @@ def parse_certificate_text(text: str) -> ParsedCertificate:
         psychiatric_departments=psych_departments,
         years=years,
         month_days=month_days,
+        period_months=period_months,
         patient_name=name_match.group(1) if name_match else None,
         raw_text=text,
     )

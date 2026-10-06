@@ -342,6 +342,22 @@ class VerificationService:
 
         approved = result.status is TruthStatus.VALID
         department_summary = ", ".join(cert.departments) or None
+        # 진단용 로그: 파싱 결과와 진위확인 응답을 기록한다.
+        logger.info(
+            "자동진위 파싱: doc=%s hospital=%s dept=%s psych=%s period=%s years=%s md=%s",
+            cert.document_no,
+            cert.hospital_name,
+            department_summary,
+            cert.is_psychiatric,
+            period,
+            cert.years,
+            cert.month_days,
+        )
+        logger.info(
+            "자동진위 결과: status=%s message=%s",
+            result.status.value,
+            result.message,
+        )
 
         # 9) 검증 요청 기록 + 이력 상태 반영 (원본 대신 지문만 저장)
         fingerprint = fingerprint_utils.fingerprint_text(cert.raw_text)
