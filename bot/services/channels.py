@@ -529,20 +529,30 @@ class ChannelService:
         except Exception:  # noqa: BLE001
             logger.exception("관리 채널 목록 조회 실패: guild=%s", guild.id)
             return
+        # 현재 유효한 병원 id 집합 (DB에 남아 있는 병원만 유지 대상)
+        valid_ids = {h.id for h in await self.bot.hospitals.list_all()}
         for record in records:
             key = record.key
             is_legacy = key == HOSPITAL_CATEGORY_KEY or (
                 key.startswith("ch:hospital:") and key.count(":") == 2
             )
+            # 병합으로 사라진 병원(id)의 카테고리도 중복이므로 정리한다.
+            if not is_legacy and key.startswith("cat:hospital:"):
+                try:
+                    hid = int(key.split(":")[-1])
+                except ValueError:
+                    hid = -1
+                if hid not in valid_ids:
+                    is_legacy = True
             if not is_legacy:
                 continue
             channel = guild.get_channel(record.discord_id)
             if channel is not None:
                 try:
                     await channel.delete(  # type: ignore[attr-defined]
-                        reason="MindFinder 레거시 병원 채널 정리"
+                        reason="MindFinder 레거시/중복 병원 카테고리 정리"
                     )
-                    logger.info("레거시 병원 채널 삭제: key=%s id=%s", key, record.discord_id)
+                    logger.info("레거시/중복 병원 채널 삭제: key=%s id=%s", key, record.discord_id)
                 except (discord.Forbidden, discord.HTTPException):
                     logger.debug("레거시 병원 채널 삭제 실패: %s", record.discord_id)
             await self.bot.managed_channels.delete(guild.id, key)

@@ -172,6 +172,46 @@ class HospitalRepository:
                 await session.delete(hospital)
             await session.commit()
 
+    async def merge_into(self, source_id: int, target_id: int) -> None:
+        """중복 병원(source)을 대표 병원(target)으로 병합하고 source 를 삭제한다.
+
+        - 입원 이력(hospital_id)을 target 으로 옮긴다.
+        - 병원 추가 요청/역할 매핑/관리 채널 기록 등 참조를 정리한다.
+        - source 의 별칭은 삭제한다 (target 에 별칭은 시드에서 별도 등록).
+        """
+        if source_id == target_id:
+            return
+        async with self.db.session() as session:
+            # 입원 이력 이동
+            await session.execute(
+                update(Admission)
+                .where(Admission.hospital_id == source_id)
+                .values(hospital_id=target_id)
+            )
+            # 병원 추가 요청(승인 시 생성되는 이력)의 병원 참조는 이름 기반이라 그대로 둔다.
+            # 관리 역할/채널 키는 hospital:{id} 이므로 옛 키를 지워 중복 생성을 막는다.
+            await session.execute(
+                delete(ManagedRole).where(ManagedRole.key == f"hospital:{source_id}")
+            )
+            await session.execute(
+                delete(ManagedChannel).where(
+                    ManagedChannel.key.in_(
+                        [
+                            f"cat:hospital:{source_id}",
+                            f"ch:hospital:{source_id}",
+                        ]
+                    )
+                )
+            )
+            # 별칭/병원 삭제
+            await session.execute(
+                delete(HospitalAlias).where(HospitalAlias.hospital_id == source_id)
+            )
+            hospital = await session.get(Hospital, source_id)
+            if hospital is not None:
+                await session.delete(hospital)
+            await session.commit()
+
 
 class AdmissionRepository:
     """admissions 테이블 접근."""

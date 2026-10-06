@@ -38,6 +38,26 @@ async def seed_hospitals(db: Database) -> None:
     defaults = _build_default_hospitals()
     default_canonicals = set(get_default_hospitals())
 
+    # 1) 기본 목록 외 병원을 먼저 정리한다. 단, 대표명으로 '정규화(resolve)'되는
+    #    병원은 같은 병원의 옛 이름일 수 있으므로 여기서 지우지 않고 아래에서 병합한다.
+    #    (예: "서울대학교어린이병원" → "서울대학교어린이병원 7A병동" 으로 이름이 바뀐 경우)
+    survivors: list = []
+    for hospital in await repo.list_all():
+        canonical = resolve_canonical(hospital.name)
+        if canonical in default_canonicals:
+            survivors.append((hospital, canonical))
+            continue
+        count = await admissions.count_by_hospital(hospital.id)
+        if count:
+            await admissions.delete_by_hospital(hospital.id)
+            logger.info(
+                "기본 목록 외 병원 이력 삭제(%d건): %s", count, hospital.name
+            )
+        await repo.delete(hospital.id)
+        logger.info("기본 목록 외 병원 삭제: %s", hospital.name)
+
+    # 2) 대표 병원을 확보하고(없으면 생성) 병동/자동검증 정보를 맞춘다.
+    canonical_to_id: dict[str, int] = {}
     for canonical in get_default_hospitals():
         normalized = normalize_name(canonical)
         meta = _DEFAULT_HOSPITAL_META.get(canonical, {})
@@ -58,6 +78,7 @@ async def seed_hospitals(db: Database) -> None:
                 await repo.set_auto_verify(
                     hospital.id, bool(meta.get("auto_verify", False))
                 )
+        canonical_to_id[canonical] = hospital.id
 
         # 별칭 등록
         for alias in defaults.get(canonical, []):
@@ -66,15 +87,18 @@ async def seed_hospitals(db: Database) -> None:
             if existing is None:
                 await repo.add_alias(hospital.id, alias_norm)
 
-    # 기본 목록 외 병원은 모두 정리한다 (관련 이력도 함께 삭제).
-    for hospital in await repo.list_all():
-        if resolve_canonical(hospital.name) in default_canonicals:
+    # 3) 같은 대표명으로 정규화되는 **중복 병원**을 대표 병원으로 병합한다.
+    #    (옛 이름으로 남아 있던 병원을 지워 카테고리/채널이 중복 생성되지 않게 한다.)
+    for hospital, canonical in survivors:
+        target_id = canonical_to_id.get(canonical)
+        if target_id is None or target_id == hospital.id:
             continue
-        count = await admissions.count_by_hospital(hospital.id)
-        if count:
-            await admissions.delete_by_hospital(hospital.id)
-            logger.info(
-                "기본 목록 외 병원 이력 삭제(%d건): %s", count, hospital.name
-            )
-        await repo.delete(hospital.id)
-        logger.info("기본 목록 외 병원 삭제: %s", hospital.name)
+        # 옛 병원에 딸린 이력/역할/채널/요청을 대표 병원으로 옮긴 뒤 삭제한다.
+        await repo.merge_into(hospital.id, target_id)
+        logger.info(
+            "중복 병원 병합: %s(id=%s) → %s(id=%s)",
+            hospital.name,
+            hospital.id,
+            canonical,
+            target_id,
+        )
