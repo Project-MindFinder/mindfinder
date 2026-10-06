@@ -56,11 +56,11 @@ MAX_ACTIONS = 5
 # 모달: 자기 신고 입원 이력 등록
 # --------------------------------------------------------------------------- #
 def _year_options() -> list[discord.SelectOption]:
-    """올해부터 40년 전까지의 연도 옵션."""
+    """올해부터 24년 전까지의 연도 옵션 (디스코드 옵션 최대 25개)."""
     current = datetime.now().year
     return [
         discord.SelectOption(label=f"{y}년", value=str(y))
-        for y in range(current, current - 40, -1)
+        for y in range(current, current - 25, -1)
     ]
 
 
