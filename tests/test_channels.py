@@ -383,15 +383,19 @@ def test_months_for_admission_includes_both_ends() -> None:
     assert len(ongoing) >= 1
 
 
-async def test_ensure_community_access_only_verified_periods(
+async def test_ensure_community_access_only_selected_verified_periods(
     service: ChannelService, bot: FakeBot
 ) -> None:
-    """'병원 역할 선택' 없이, 인증(verified)된 이력만 기간 채널이 열린다."""
+    """병원 역할은 **사용자가 선택(opt-in)한 경우에만** 부여되고 기간 채널이 열린다.
+
+    - 인증(verified) 이력이 있어도 선택하지 않으면 역할/기간 채널이 없다.
+    - 선택하면 역할이 부여되고 그 병원의 기간 채널이 열린다.
+    """
     await bot.users.ensure_user(1)
     hospital = await bot.hospitals.create("서울대학교병원", "서울대학교병원")
     child = await bot.hospitals.create("서울대학교어린이병원", "서울대학교어린이병원")
 
-    # 2020년 3월 한 달 입원(검증 완료) — opt-in 없이도 열려야 한다.
+    # 2020년 3월 한 달 입원(검증 완료)
     adm_id = await bot.admissions.add(
         user_id=1,
         hospital_id=hospital.id,
@@ -414,9 +418,21 @@ async def test_ensure_community_access_only_verified_periods(
     )
 
     guild = FakeGuild()
-    await service.ensure_community_access(guild, 1)  # type: ignore[arg-type]
 
-    # 인증된 병원 카테고리 안에 "2020년-3월" 기간 채널이 있어야 한다.
+    # (1) 선택하지 않은 상태 → 역할/기간 채널이 만들어지지 않는다.
+    await service.ensure_community_access(guild, 1)  # type: ignore[arg-type]
+    role_record = await bot.managed_roles.get(guild.id, f"hospital:{hospital.id}")
+    assert role_record is None
+    hospital_cat = next(
+        (c for c in guild.categories if "서울대학교병원" in c.name), None
+    )
+    assert hospital_cat is None or hospital_cat.text_channels == []
+
+    # (2) 병원을 '선택'하면 역할이 부여되고 기간 채널이 열린다.
+    await bot.access.set_hospital_optin(1, hospital.id, True)
+    await service.ensure_community_access(guild, 1)  # type: ignore[arg-type]
+    role_record = await bot.managed_roles.get(guild.id, f"hospital:{hospital.id}")
+    assert role_record is not None
     hospital_cat = next(
         (c for c in guild.categories if "서울대학교병원" in c.name), None
     )
@@ -424,10 +440,6 @@ async def test_ensure_community_access_only_verified_periods(
     period_names = [c.name for c in hospital_cat.text_channels]
     assert "2020년-3월" in period_names
     assert "2021년-1월" not in period_names
-
-    # 인증된 병원 역할이 생성되어 있어야 한다 (역할이 있으면 채널이 보인다).
-    role_record = await bot.managed_roles.get(guild.id, f"hospital:{hospital.id}")
-    assert role_record is not None
 
     # 미인증 병원(어린이병원)에는 기간 채널이 만들어지지 않아야 한다.
     child_cat = next(

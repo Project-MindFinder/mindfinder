@@ -2023,8 +2023,30 @@ class MatchPanelView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @discord.ui.button(
+        label="매칭 표시명 설정", style=discord.ButtonStyle.secondary,
+        custom_id="mf:m_matchname", row=3,
+    )
+    async def match_name(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """매칭 시 상대에게 보일 **표시명 방식**을 설정한다."""
+        mode, nickname = await self.bot.display_prefs.get_match_name(
+            interaction.user.id
+        )
+        extra = f" (현재 닉네임: {nickname})" if nickname else ""
+        await interaction.response.send_message(
+            "**매칭할 때 상대에게 보일 이름**을 선택하세요.\n"
+            "· 기본 마스킹 — 디스코드 표시명 가운데만 가림\n"
+            "· 실명 — 디스코드 표시명 그대로\n"
+            "· **병원에서 불린 닉네임(추천)** — 입원 당시 불리던 이름"
+            + extra,
+            view=MatchNameView(self.bot, mode),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
         label="매칭 채널 닫기", style=discord.ButtonStyle.danger,
-        custom_id="mf:m_close", row=3,
+        custom_id="mf:m_close", row=4,
     )
     async def close_channel(
         self, interaction: discord.Interaction, _button: discord.ui.Button
@@ -2190,12 +2212,119 @@ class MatchNameView(discord.ui.View):
         )
 
 
+class HospitalRoleSelectView(discord.ui.View):
+    """인증받은 병원 중 **역할(태그)을 표시할 병원**을 사용자가 선택/해제한다.
+
+    병원 역할 태그는 자동으로 달지 않는다. 선택 상태는 DB(hospital_optins)에
+    사람별로 저장하고, 선택한 병원만 역할이 부여되어 기간 채널이 보인다.
+    """
+
+    def __init__(self, bot: MindFinderBot, hospitals: list, opted_in: set) -> None:
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.hospitals = hospitals
+        options = [
+            discord.SelectOption(
+                label=hospital_display_name(h.name)[:100],
+                value=str(h.id),
+                description=("표시 중 (해제하려면 다시 선택)" if h.id in opted_in
+                             else "선택 시 역할 태그 표시 + 기간 채널 열림"),
+                default=(h.id in opted_in),
+            )
+            for h in hospitals[:25]
+        ]
+        select: discord.ui.Select = discord.ui.Select(
+            placeholder="역할 태그를 표시할 병원을 선택하세요",
+            options=options,
+            min_values=0,
+            max_values=min(len(options), 25),
+        )
+        select.callback = self._on_select  # type: ignore[method-assign]
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "서버에서만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+        values = {int(v) for v in (interaction.data.get("values", []) if interaction.data else [])}
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        member = interaction.guild.get_member(interaction.user.id)
+        changed: list[str] = []
+        for hospital in self.hospitals:
+            want = hospital.id in values
+            already = await self.bot.access.is_hospital_optin(
+                interaction.user.id, hospital.id
+            )
+            if want == already:
+                continue
+            await self.bot.access.set_hospital_optin(
+                interaction.user.id, hospital.id, want
+            )
+            if member is not None:
+                if want:
+                    await self.bot.access.grant_hospital_role(
+                        interaction.guild, member, hospital.id, hospital.name
+                    )
+                else:
+                    await self.bot.access.revoke_hospital_role(
+                        interaction.guild, member, hospital.id
+                    )
+            changed.append(
+                f"{hospital_display_name(hospital.name)} → "
+                + ("표시" if want else "숨김")
+            )
+        # 선택에 따라 기간 채널 접근을 동기화한다.
+        try:
+            await self.bot.channel_service.ensure_community_access(
+                interaction.guild, interaction.user.id
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("커뮤니티 접근 동기화 실패: user=%s", interaction.user.id)
+        msg = "변경된 항목이 없습니다."
+        if changed:
+            msg = "✅ 역할 태그 설정을 반영했습니다.\n" + "\n".join(changed)
+        await interaction.followup.send(msg, ephemeral=True)
+
+
 class CommunityPanelView(discord.ui.View):
     """커뮤니티 패널: 인증 기반 병원·기간 커뮤니티 / 지식기반 인증 / 내 정보."""
 
     def __init__(self, bot: MindFinderBot) -> None:
         super().__init__(timeout=None)
         self.bot = bot
+
+    @discord.ui.button(
+        label="병원 역할 태그 설정", style=discord.ButtonStyle.primary,
+        custom_id="mf:c_hospitalrole", row=0,
+    )
+    async def hospital_role_select(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """인증받은 병원 중 **역할 태그를 표시할 병원**을 직접 선택/해제한다.
+
+        역할 태그는 자동으로 달지 않고, 선택한 병원만 태그가 붙고
+        그 병원의 기간 채널이 열린다.
+        """
+        hospitals = await self._verified_hospitals_for(interaction.user.id)
+        if not hospitals:
+            await interaction.response.send_message(
+                "먼저 **서류 인증 또는 지식기반 인증**을 완료해야 "
+                "병원 역할 태그를 선택할 수 있습니다.",
+                ephemeral=True,
+            )
+            return
+        opted_in = set(
+            await self.bot.access.optedin_hospital_ids(interaction.user.id)
+        )
+        await interaction.response.send_message(
+            "**역할 태그를 표시할 병원**을 선택하세요.\n"
+            "· 선택하면 해당 병원 태그가 붙고 그 병원의 기간 채널이 열립니다.\n"
+            "· 다시 눌러 선택을 해제하면 태그가 사라집니다.",
+            view=HospitalRoleSelectView(self.bot, hospitals, opted_in),
+            ephemeral=True,
+        )
 
     async def _verified_hospitals_for(self, user_id: int) -> list:
         """사용자가 서류 인증(verified)을 받은 병원 객체 목록."""
@@ -2388,28 +2517,6 @@ class CommunityPanelView(discord.ui.View):
             "내 입원 정보를 **어디까지 공개**할지 선택하세요.\n"
             "(병원만 / 기간까지 / 아무것도 안 보이게)",
             view=DisplayScopeView(self.bot, current),
-            ephemeral=True,
-        )
-
-    @discord.ui.button(
-        label="매칭 표시명 설정", style=discord.ButtonStyle.secondary,
-        custom_id="mf:c_matchname", row=2,
-    )
-    async def match_name(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
-    ) -> None:
-        """매칭 시 상대에게 보일 **표시명 방식**을 설정한다."""
-        mode, nickname = await self.bot.display_prefs.get_match_name(
-            interaction.user.id
-        )
-        extra = f" (현재 닉네임: {nickname})" if nickname else ""
-        await interaction.response.send_message(
-            "**매칭할 때 상대에게 보일 이름**을 선택하세요.\n"
-            "· 기본 마스킹 — 디스코드 표시명 가운데만 가림\n"
-            "· 실명 — 디스코드 표시명 그대로\n"
-            "· **병원에서 불린 닉네임(추천)** — 입원 당시 불리던 이름"
-            + extra,
-            view=MatchNameView(self.bot, mode),
             ephemeral=True,
         )
 
@@ -2918,7 +3025,9 @@ async def grant_verified_access(
             except discord.Forbidden:
                 logger.warning("인증 역할 부여 권한 없음: user=%s", user_id)
 
-    # 병원 채널 확보 (역할은 사용자가 커뮤니티 패널에서 선택할 때만 부여)
+    # 병원 카테고리는 확보하되 **역할(태그)은 자동 부여하지 않는다.**
+    # 역할은 사용자가 커뮤니티 패널의 '병원 역할 태그 설정'에서 직접 선택할 때만
+    # 부여하고, 선택 상태는 DB(hospital_optins)로 사람별 관리한다.
     hospital_name = getattr(result, "hospital_name", None)
     if not hospital_name:
         return
@@ -2926,18 +3035,11 @@ async def grant_verified_access(
     if hospital is None:
         hospital = await VerificationService(bot).resolve_hospital(hospital_name)
     try:
-        await bot.channel_service.ensure_hospital_channel(
+        await bot.channel_service.ensure_hospital_category(
             guild, hospital.id, hospital.name, with_role=False
         )
     except Exception:  # noqa: BLE001
-        logger.exception("병원 채널 확보 실패: hospital=%s", hospital.id)
-
-    # 인증이 끝나면 **자동으로** 내 입원 기간에 맞는 비공개 기간 채널을 연다.
-    # (같은 기간에 입원했던 인증자에게만 그 방이 보인다.)
-    try:
-        await bot.channel_service.ensure_community_access(guild, user_id)
-    except Exception:  # noqa: BLE001
-        logger.exception("인증 후 기간 채널 자동 생성 실패: user=%s", user_id)
+        logger.exception("병원 카테고리 확보 실패: hospital=%s", hospital.id)
 
 
 # --------------------------------------------------------------------------- #

@@ -392,14 +392,14 @@ class ChannelService:
     async def ensure_community_access(
         self, guild: discord.Guild, user_id: int
     ) -> None:
-        """인증 사용자를 자신의 이력(병원·기간)에 맞는 기간 **채널**로 안내한다.
+        """사용자가 **선택한** 병원의 기간 채널 접근을 동기화한다.
 
-        **별도 '병원 역할 선택' 없이**, 서류/지식 인증(verified)을 받은 이력을
-        기준으로 자동 처리한다.
+        중요: 병원 역할(태그)은 **자동으로 부여하지 않는다.**
+        역할은 사용자가 커뮤니티 패널에서 직접 '선택'했을 때만 부여하고,
+        선택 상태는 DB(hospital_optins)로 사람별 관리한다.
 
-        - 인증받은 병원의 카테고리/역할을 확보·부여하고 (역할이 있으면
-          기간 채널이 자동으로 보인다)
-        - 입원 기간에 걸치는 '월 단위' 비공개 채널을 확보한다.
+        여기서는 '선택된 병원'에 대해서만 카테고리·기간 채널을 확보하고,
+        선택을 해제한 병원의 역할은 회수한다.
         """
         member = guild.get_member(user_id)
         if member is None:
@@ -407,25 +407,43 @@ class ChannelService:
         admissions = await self.bot.admissions.list_by_user(user_id)
         if not admissions:
             return
+        # 사용자가 선택(opt-in)한 병원 id 집합
+        try:
+            opted_in = set(await self.bot.access.optedin_hospital_ids(user_id))
+        except Exception:  # noqa: BLE001
+            logger.exception("병원 선택 상태 조회 실패: user=%s", user_id)
+            opted_in = set()
+
+        # 인증(verified)되어 커뮤니티 대상인 이력의 병원 id
+        eligible_ids = {
+            adm.hospital_id
+            for adm in admissions
+            if adm.verification == "verified"
+            and getattr(adm, "is_community_eligible", True)
+        }
+
         for adm in admissions:
-            # 서류/지식 인증(verified)을 받은 이력만 병원·기간 커뮤니티를 연다.
             if adm.verification != "verified":
                 continue
-            # 정신과가 아닌 입원(응급실 등)은 커뮤니티 대상이 아니다.
             if not getattr(adm, "is_community_eligible", True):
                 continue
-            # 인증된 병원의 카테고리/역할을 자동 확보하고 역할을 부여한다.
+            selected = adm.hospital_id in opted_in
+            # 카테고리는 항상 확보하되, 역할은 **선택한 경우에만** 부여한다.
             try:
                 await self.ensure_hospital_category(
-                    guild, adm.hospital_id, adm.hospital.name, with_role=True
+                    guild, adm.hospital_id, adm.hospital.name, with_role=selected
                 )
-                await self.bot.access.grant_hospital_role(
-                    guild, member, adm.hospital_id, adm.hospital.name
-                )
+                if selected:
+                    await self.bot.access.grant_hospital_role(
+                        guild, member, adm.hospital_id, adm.hospital.name
+                    )
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "병원 역할/카테고리 자동 확보 실패: hospital=%s", adm.hospital_id
+                    "병원 카테고리/역할 동기화 실패: hospital=%s", adm.hospital_id
                 )
+            # 기간 채널은 선택한 병원에 대해서만 확보한다.
+            if not selected:
+                continue
             for ym_value in self.months_for_admission(adm):
                 await self.ensure_period_channel(
                     guild,
@@ -433,6 +451,17 @@ class ChannelService:
                     adm.hospital.name,
                     ym_value,
                     with_role=True,
+                )
+
+        # 선택을 해제한 병원의 역할은 회수한다 (태그 제거).
+        for hospital_id in eligible_ids - opted_in:
+            try:
+                await self.bot.access.revoke_hospital_role(
+                    guild, member, hospital_id
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "병원 역할 회수 실패: user=%s hospital=%s", user_id, hospital_id
                 )
 
     # ---------- 전체 구성 ----------
@@ -505,16 +534,15 @@ class ChannelService:
             guild, ADMIN_CHANNEL_KEY, ADMIN_CHANNEL_NAME, admin_cat, admin_ow
         )
 
-        # 5) 병원별 카테고리
-        #    '병원 역할 선택' 없이, 인증(verified)된 이력이 있는 병원은
-        #    카테고리·역할을 자동으로 확보한다. 그 외 병원은 카테고리만 확보한다.
-        #    (기간 채널은 인증 사용자가 생길 때 ensure_community_access 가 만든다.)
+        # 5) 병원별 카테고리 (이름 = 병원명)
+        #    카테고리만 확보하고, **역할(태그)은 만들지 않는다.**
+        #    역할은 사용자가 커뮤니티 패널에서 직접 선택할 때만 생성·부여하며,
+        #    선택 상태는 DB(hospital_optins)로 사람별 관리한다.
+        #    (기간 채널은 선택한 사용자에 대해 ensure_community_access 가 만든다.)
         await self._cleanup_legacy_hospital_channels(guild)
-        verified_hospital_ids = await self._verified_hospital_ids()
         for hospital in await self.bot.hospitals.list_all():
-            with_role = hospital.id in verified_hospital_ids
             await self.ensure_hospital_category(
-                guild, hospital.id, hospital.name, with_role=with_role
+                guild, hospital.id, hospital.name, with_role=False
             )
 
     async def _cleanup_legacy_hospital_channels(self, guild: discord.Guild) -> None:
