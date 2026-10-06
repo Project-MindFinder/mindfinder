@@ -415,7 +415,8 @@ class ChannelService:
             thread = await channel.create_thread(
                 name=thread_name,
                 type=thread_type,
-                invitable=False,
+                # 비공개 스레드는 멤버를 추가(add_user)해야 하므로 invitable=True 여야 한다.
+                invitable=True,
                 reason="MindFinder 기간 커뮤니티",
             )
         except (discord.Forbidden, discord.HTTPException):
