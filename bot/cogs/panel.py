@@ -36,6 +36,7 @@ from bot.services.channels import (
 from bot.services.matching import Candidate, MatchingService
 from bot.services.verification import VERIFICATION_LABEL, VerificationService
 from bot.ui.consent import build_consent_embed, ensure_consent
+from bot.ui.knowledge import AnswerRequestView, VerdictView
 from bot.utils.hospitals import hospital_display_name, normalize_name
 from bot.utils.periods import PeriodError, format_ym, parse_period_input
 
@@ -885,6 +886,124 @@ class IncomingRequestView(discord.ui.View):
 
 
 # --------------------------------------------------------------------------- #
+# 지식기반 인증 (패널 버튼용)
+# --------------------------------------------------------------------------- #
+class KnowledgeAskModal(discord.ui.Modal, title="지식기반 인증 질문 보내기"):
+    """서류 인증을 마친 사용자가 동료에게 병동 경험 질문을 보낸다."""
+
+    질문 = discord.ui.TextInput(
+        label="질문",
+        style=discord.TextStyle.paragraph,
+        placeholder="예: 3월에 입원했을 때 담당 간호사실 위치가 어디였나요?",
+        max_length=500,
+    )
+
+    def __init__(
+        self, bot: MindFinderBot, admission_id: int, respondent_id: int
+    ) -> None:
+        super().__init__()
+        self.bot = bot
+        self.admission_id = admission_id
+        self.respondent_id = respondent_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        request_id, message = await self.bot.knowledge_service.ask(
+            asker_id=interaction.user.id,
+            admission_id=self.admission_id,
+            respondent_id=self.respondent_id,
+            question=str(self.질문.value),
+        )
+        if request_id is None:
+            await interaction.response.send_message(f"⚠️ {message}", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="❓ 지식기반 인증 질문이 도착했습니다",
+            description=(
+                f"**대상**: {message}\n\n"
+                f"> {str(self.질문.value)}\n\n"
+                "이 시기·병원에 실제로 있었다면 답변해주세요. "
+                "정답으로 확인되면 관리자 승인을 거쳐 인증이 부여됩니다."
+            ),
+            color=discord.Color.blurple(),
+        )
+        try:
+            user = await self.bot.fetch_user(self.respondent_id)
+            dm = await user.send(
+                embed=embed, view=AnswerRequestView(self.bot, request_id)
+            )
+            await self.bot.knowledge.set_message(request_id, dm.channel.id, dm.id)
+        except (discord.Forbidden, discord.HTTPException):
+            logger.info("응답자 DM 전송 실패: user=%s", self.respondent_id)
+            await interaction.response.send_message(
+                "✅ 질문을 등록했습니다. 다만 상대방이 DM 을 받을 수 없어 전달되지 "
+                "않았습니다. 상대에게 DM 을 열어달라고 안내해주세요.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "✅ 질문을 보냈습니다. 상대가 답변하면 '지식 인증 현황'에서 판정할 수 있습니다.",
+            ephemeral=True,
+        )
+
+
+class KnowledgeAskView(discord.ui.View):
+    """질문할 본인 이력(서류 인증 완료)을 고르는 뷰."""
+
+    def __init__(
+        self, bot: MindFinderBot, admissions: list, respondent_id: int
+    ) -> None:
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.respondent_id = respondent_id
+        options = [
+            discord.SelectOption(
+                label=f"{adm.hospital.name} {adm.period_text()}"[:100],
+                value=str(adm.id),
+            )
+            for adm in admissions[:25]
+        ]
+        select = discord.ui.Select(
+            placeholder="질문할 본인 이력을 선택하세요", options=options
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        admission_id = int(interaction.data["values"][0])
+        await interaction.response.send_modal(
+            KnowledgeAskModal(self.bot, admission_id, self.respondent_id)
+        )
+
+
+class KnowledgeUserSelectView(discord.ui.View):
+    """질문을 보낼 동료를 고르는 뷰 (같은 병원·시기 경험자)."""
+
+    def __init__(
+        self,
+        bot: MindFinderBot,
+        admissions: list,
+        options: list[discord.SelectOption],
+    ) -> None:
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.admissions = admissions
+        select = discord.ui.Select(
+            placeholder="질문을 보낼 동료를 선택하세요", options=options[:25]
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        respondent_id = int(interaction.data["values"][0])
+        await interaction.response.send_message(
+            "질문할 본인의 인증된 이력을 선택한 뒤, 질문을 작성해주세요.",
+            view=KnowledgeAskView(self.bot, self.admissions, respondent_id),
+            ephemeral=True,
+        )
+
+
+# --------------------------------------------------------------------------- #
 # 인증 패널 (영구 뷰) — 🔐-인증 채널
 # --------------------------------------------------------------------------- #
 class VerifyPanelView(discord.ui.View):
@@ -941,6 +1060,110 @@ class VerifyPanelView(discord.ui.View):
         if not await ensure_consent(self.bot, interaction, _proceed):
             return
         await _proceed(interaction)
+
+    @discord.ui.button(
+        label="지식기반 질문 보내기", style=discord.ButtonStyle.secondary,
+        custom_id="mf:v_ask", row=1,
+    )
+    async def ask_knowledge(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """서류 인증자로서 동료에게 병동 경험 질문을 보낸다 (지식기반 인증)."""
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "서버에서만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+        admissions = [
+            a
+            for a in await self.bot.admissions.list_by_user(interaction.user.id)
+            if a.verification == "verified"
+        ]
+        if not admissions:
+            await interaction.response.send_message(
+                "⚠️ 서류 인증을 마친 이력이 있어야 질문할 수 있습니다.",
+                ephemeral=True,
+            )
+            return
+
+        # 같은 병원·시기 경험자(자기 자신 제외)를 후보로 모은다.
+        seen: set[int] = set()
+        options: list[discord.SelectOption] = []
+        for adm in admissions:
+            others = await self.bot.admissions.find_overlapping(
+                hospital_id=adm.hospital_id,
+                admit_ym_val=adm.admit_ym,
+                discharge_ym_val=adm.discharge_ym,
+                exclude_user_id=interaction.user.id,
+            )
+            for other in others:
+                if other.user_id in seen:
+                    continue
+                seen.add(other.user_id)
+                name = MatchingService.mask_name(interaction.guild, other.user_id)
+                options.append(
+                    discord.SelectOption(
+                        label=(
+                            f"{name} · {other.hospital.name} {other.period_text()}"
+                        )[:100],
+                        value=str(other.user_id),
+                    )
+                )
+        if not options:
+            await interaction.response.send_message(
+                "같은 병원·시기에 등록된 동료가 아직 없습니다.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            "질문을 보낼 동료를 선택하세요.",
+            view=KnowledgeUserSelectView(self.bot, admissions, options),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="지식 인증 현황", style=discord.ButtonStyle.secondary,
+        custom_id="mf:v_kstatus", row=1,
+    )
+    async def knowledge_status(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """내가 받은 질문(답변)과 내가 보낸 질문(판정)을 한 번에 보여준다."""
+        to_answer = await self.bot.knowledge_service.list_for_respondent(
+            interaction.user.id, "awaiting_answer"
+        )
+        to_verdict = await self.bot.knowledge_service.list_for_respondent(
+            interaction.user.id, "awaiting_verdict"
+        )
+        embed = discord.Embed(
+            title="🧠 지식기반 인증 현황", color=discord.Color.blurple()
+        )
+        if to_answer:
+            embed.add_field(
+                name=f"답변할 질문 ({len(to_answer)}건)",
+                value="\n".join(f"#{r.id} · {r.period_text}" for r in to_answer[:5]),
+                inline=False,
+            )
+        if to_verdict:
+            embed.add_field(
+                name=f"판정할 질문 ({len(to_verdict)}건)",
+                value="\n".join(f"#{r.id} · {r.period_text}" for r in to_verdict[:5]),
+                inline=False,
+            )
+        if not to_answer and not to_verdict:
+            embed.description = "진행 중인 지식기반 인증이 없습니다."
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        if to_answer:
+            await interaction.followup.send(
+                "받은 질문에 답변하세요.",
+                view=AnswerRequestView(self.bot, to_answer[0].id),
+                ephemeral=True,
+            )
+        if to_verdict:
+            await interaction.followup.send(
+                "보낸 질문의 응답을 판정하세요.",
+                view=VerdictView(self.bot, to_verdict[0].id),
+                ephemeral=True,
+            )
 
     @discord.ui.button(
         label="기타 병원 직접 입력", style=discord.ButtonStyle.secondary,
@@ -1656,6 +1879,17 @@ class PanelCog(commands.Cog):
                 "**그 외 병원** → 입원 기간 입력 후 관리자 수동 심사\n"
                 "목록에 없는 병원은 ‘기타 병원 직접 입력’으로 요청\n"
                 "2단계 인증 → **병원·기간 커뮤니티 + 매칭** 이용"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="③ 지식기반 인증 / 기타 방법",
+            value=(
+                "이미 서류 인증을 마친 사람이라면 **‘지식기반 질문 보내기’** 로 "
+                "동료에게 병동 경험 질문을 보낼 수 있습니다(‘지식 인증 현황’에서 "
+                "답변·판정).\n"
+                "서류·지식 외의 방법은 **‘기타 방법 인증’** 으로 사유를 적어 "
+                "관리자 수동 승인을 요청하세요."
             ),
             inline=False,
         )
