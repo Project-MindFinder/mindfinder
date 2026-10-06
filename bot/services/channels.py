@@ -316,10 +316,16 @@ class ChannelService:
         ym_value: int,
         *,
         with_role: bool = True,
+        members: Optional[Sequence[discord.Member]] = None,
     ) -> Optional[discord.TextChannel]:
         """병원 카테고리 안에 **기간(월) 비공개 채널**을 확보한다.
 
-        이름은 ``{year}년-{month}월`` 이며, 해당 병원 역할을 가진 사람만 본다.
+        이름은 ``{year}년-{month}월`` 이다.
+
+        접근 방식:
+        - ``members`` 가 주어지면 그 사용자들에게 **개별 오버라이트**로 접근을 준다.
+          (역할 태그를 선택하지 않아도 채널은 보인다 — 인증만 하면 열림)
+        - ``with_role`` 이면 병원 역할을 가진 사람도 볼 수 있게 한다(선택한 경우).
         """
         category = await self.ensure_hospital_category(
             guild, hospital_id, hospital_name, with_role=with_role
@@ -333,6 +339,14 @@ class ChannelService:
         overwrites = self._hospital_overwrites(guild, hospital_role)
         if tier2_role is not None:
             overwrites[tier2_role] = discord.PermissionOverwrite(view_channel=False)
+        # 인증한 사용자 개개인에게 접근 권한을 부여한다 (역할 태그와 무관).
+        for member in members or ():
+            if member is not None:
+                overwrites[member] = discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                )
         return await self._ensure_text(
             guild,
             self.period_channel_key(hospital_id, ym_value),
@@ -428,7 +442,7 @@ class ChannelService:
             if not getattr(adm, "is_community_eligible", True):
                 continue
             selected = adm.hospital_id in opted_in
-            # 카테고리는 항상 확보하되, 역할은 **선택한 경우에만** 부여한다.
+            # 카테고리는 항상 확보하되, 역할(태그)은 **선택한 경우에만** 부여한다.
             try:
                 await self.ensure_hospital_category(
                     guild, adm.hospital_id, adm.hospital.name, with_role=selected
@@ -441,16 +455,16 @@ class ChannelService:
                 logger.exception(
                     "병원 카테고리/역할 동기화 실패: hospital=%s", adm.hospital_id
                 )
-            # 기간 채널은 선택한 병원에 대해서만 확보한다.
-            if not selected:
-                continue
+            # 기간 채널은 **인증만 하면 열린다** (역할 태그 선택과 무관).
+            # 역할 태그를 안 골라도 채널은 사용자 개별 권한으로 보이게 한다.
             for ym_value in self.months_for_admission(adm):
                 await self.ensure_period_channel(
                     guild,
                     adm.hospital_id,
                     adm.hospital.name,
                     ym_value,
-                    with_role=True,
+                    with_role=selected,
+                    members=[member],
                 )
 
         # 선택을 해제한 병원의 역할은 회수한다 (태그 제거).

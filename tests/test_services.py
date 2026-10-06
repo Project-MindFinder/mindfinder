@@ -70,6 +70,16 @@ class FakeMember:
         self.display_name = f"user{user_id}"
 
 
+class _FakeMessage:
+    """send() 반환값 대역 (pin 등)."""
+
+    async def pin(self, reason=None) -> None:  # noqa: ANN001
+        return None
+
+    async def delete(self, reason=None) -> None:  # noqa: ANN001
+        return None
+
+
 class FakeTextChannel:
     """매칭 비공개 채널 대역."""
 
@@ -82,8 +92,10 @@ class FakeTextChannel:
     def mention(self) -> str:
         return f"<#{self.id}>"
 
-    async def send(self, **kwargs) -> None:  # noqa: ANN003
+    async def send(self, **kwargs):  # noqa: ANN003, ANN201
         self.sent.append(kwargs)
+        # 실제 discord 는 Message 를 반환한다. 패널 고정(pin) 대역을 위해 객체를 돌려준다.
+        return _FakeMessage()
 
     async def edit(self, **kwargs) -> None:  # noqa: ANN003
         """채널 이름/토픽 변경 대역 (매칭 채널 고유번호 이름 반영)."""

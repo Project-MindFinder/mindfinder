@@ -3041,6 +3041,12 @@ async def grant_verified_access(
     except Exception:  # noqa: BLE001
         logger.exception("병원 카테고리 확보 실패: hospital=%s", hospital.id)
 
+    # 인증 직후 **내 입원 기간 채널을 열어 준다** (개별 권한, 역할 태그와 무관).
+    try:
+        await bot.channel_service.ensure_community_access(guild, user_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("인증 후 기간 채널 동기화 실패: user=%s", user_id)
+
 
 # --------------------------------------------------------------------------- #
 # 코그: 패널 게시 및 패널 채널 PDF 자동 진위확인

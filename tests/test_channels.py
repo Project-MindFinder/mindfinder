@@ -383,13 +383,14 @@ def test_months_for_admission_includes_both_ends() -> None:
     assert len(ongoing) >= 1
 
 
-async def test_ensure_community_access_only_selected_verified_periods(
+async def test_ensure_community_access_only_verified_periods(
     service: ChannelService, bot: FakeBot
 ) -> None:
-    """병원 역할은 **사용자가 선택(opt-in)한 경우에만** 부여되고 기간 채널이 열린다.
+    """인증(verified) 이력의 기간 채널은 열리고, 역할 태그는 선택 시에만 부여된다.
 
-    - 인증(verified) 이력이 있어도 선택하지 않으면 역할/기간 채널이 없다.
-    - 선택하면 역할이 부여되고 그 병원의 기간 채널이 열린다.
+    - 인증만 하면 기간 채널은 (개별 권한으로) 열린다 — 역할 태그와 무관.
+    - 병원 역할(태그)은 **사용자가 선택(opt-in)한 경우에만** 생성·부여된다.
+    - 미인증(자기 신고) 이력은 기간 채널이 만들어지지 않는다.
     """
     await bot.users.ensure_user(1)
     hospital = await bot.hospitals.create("서울대학교병원", "서울대학교병원")
@@ -419,20 +420,10 @@ async def test_ensure_community_access_only_selected_verified_periods(
 
     guild = FakeGuild()
 
-    # (1) 선택하지 않은 상태 → 역할/기간 채널이 만들어지지 않는다.
+    # (1) 선택하지 않은 상태 → 기간 채널은 열리되, 역할(태그)은 만들지 않는다.
     await service.ensure_community_access(guild, 1)  # type: ignore[arg-type]
     role_record = await bot.managed_roles.get(guild.id, f"hospital:{hospital.id}")
     assert role_record is None
-    hospital_cat = next(
-        (c for c in guild.categories if "서울대학교병원" in c.name), None
-    )
-    assert hospital_cat is None or hospital_cat.text_channels == []
-
-    # (2) 병원을 '선택'하면 역할이 부여되고 기간 채널이 열린다.
-    await bot.access.set_hospital_optin(1, hospital.id, True)
-    await service.ensure_community_access(guild, 1)  # type: ignore[arg-type]
-    role_record = await bot.managed_roles.get(guild.id, f"hospital:{hospital.id}")
-    assert role_record is not None
     hospital_cat = next(
         (c for c in guild.categories if "서울대학교병원" in c.name), None
     )
@@ -440,6 +431,12 @@ async def test_ensure_community_access_only_selected_verified_periods(
     period_names = [c.name for c in hospital_cat.text_channels]
     assert "2020년-3월" in period_names
     assert "2021년-1월" not in period_names
+
+    # (2) 병원을 '선택'하면 역할(태그)이 부여된다.
+    await bot.access.set_hospital_optin(1, hospital.id, True)
+    await service.ensure_community_access(guild, 1)  # type: ignore[arg-type]
+    role_record = await bot.managed_roles.get(guild.id, f"hospital:{hospital.id}")
+    assert role_record is not None
 
     # 미인증 병원(어린이병원)에는 기간 채널이 만들어지지 않아야 한다.
     child_cat = next(

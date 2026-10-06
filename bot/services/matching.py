@@ -39,6 +39,47 @@ class AcceptResult:
     error: Optional[str] = None
 
 
+class MatchChannelCloseButton(discord.ui.View):
+    """매칭 채널 안에 고정되는 '매칭 채널 닫기' 버튼 뷰.
+
+    이 채널 자체에서 바로 닫을 수 있게 한다 (기록은 보존, 채팅만 차단).
+    영구 뷰로 등록해 재시작 후에도 동작하도록 한다.
+    """
+
+    def __init__(self, bot: "MindFinderBot", channel_id: int) -> None:
+        # custom_id 에 채널 id 를 넣어 재시작 후에도 이 뷰를 복원할 수 있게 한다.
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.channel_id = channel_id
+        button: discord.ui.Button = discord.ui.Button(
+            label="매칭 채널 닫기",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"mf:matchclose:{channel_id}",
+        )
+        button.callback = self._on_close  # type: ignore[method-assign]
+        self.add_item(button)
+
+    async def _on_close(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not isinstance(
+            interaction.channel, discord.TextChannel
+        ):
+            await interaction.response.send_message(
+                "서버에서만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+        ok = await self.bot.matching_service.close_channel(
+            interaction.guild, interaction.user.id, interaction.channel
+        )
+        if not ok:
+            await interaction.response.send_message(
+                "이 매칭 채널의 참여자만 닫을 수 있습니다.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            "🔒 매칭 채널을 닫았습니다. (기록은 보존됩니다.)", ephemeral=True
+        )
+
+
 class MatchingService:
     """매칭 희망 설정, 후보 찾기, 신청/수락/거절, 비공개 채널 연결."""
 
@@ -371,7 +412,7 @@ class MatchingService:
         self, channel: discord.TextChannel, member_ids: Sequence[int],
         hospital_name: str
     ) -> None:
-        """매칭 채널에 시작 안내 임베드를 남긴다."""
+        """매칭 채널에 시작 안내 임베드를 남기고, 닫기 버튼 패널을 고정한다."""
         mentions = " ".join(f"<@{uid}>" for uid in member_ids)
         embed = discord.Embed(
             title="🤝 매칭이 성사되었습니다",
@@ -379,7 +420,6 @@ class MatchingService:
                 f"같은 병원·시기에 입원했던 동료끼리 연결되었습니다.\n"
                 f"병원: {hospital_name}\n\n"
                 "이제 이 비공개 채널에서 자유롭게 대화하세요.\n"
-                "다른 동료를 더 초대하려면 패널의 '동료 초대' 버튼을 사용하세요.\n"
                 "⚠️ 전화번호/SNS 등 개인정보는 본인 판단으로 신중히 공유하세요."
             ),
             color=discord.Color.green(),
@@ -388,6 +428,28 @@ class MatchingService:
             await channel.send(content=mentions, embed=embed)
         except discord.HTTPException:
             logger.exception("매칭 채널 안내 전송 실패: channel=%s", channel.id)
+
+        # 채널 상단에 '매칭 채널 닫기' 버튼 패널을 게시하고 고정한다.
+        # (이 채널 자체에서 바로 닫을 수 있도록 — 매칭 패널로 돌아갈 필요 없음)
+        try:
+            panel = await channel.send(
+                embed=discord.Embed(
+                    title="🔒 매칭 채널 관리",
+                    description=(
+                        "대화를 마쳤다면 아래 버튼으로 이 채널을 닫을 수 있습니다.\n"
+                        "(기록은 보존되고 채팅만 막힙니다.)"
+                    ),
+                    color=discord.Color.dark_gray(),
+                ),
+                view=MatchChannelCloseButton(self.bot, channel.id),
+            )
+            if panel is not None:
+                try:
+                    await panel.pin(reason="MindFinder 매칭 채널 닫기 패널 고정")
+                except discord.HTTPException:
+                    logger.debug("매칭 채널 패널 고정 실패: channel=%s", channel.id)
+        except discord.HTTPException:
+            logger.exception("매칭 채널 패널 게시 실패: channel=%s", channel.id)
 
     @staticmethod
     def mask_name(guild: Optional[discord.Guild], user_id: int) -> str:
