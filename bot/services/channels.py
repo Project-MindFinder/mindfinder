@@ -4,11 +4,13 @@
 
 구성:
   - 인증 카테고리
-      · 🔐-인증        : 아무나 접근 (자기 신고·서류 제출 안내)
-      · 🧭-패널        : 아무나 접근 (상시 버튼 패널, PDF 업로드)
+      · 🔐-인증        : 아무나 접근 (자기 신고·서류 인증 패널)
+      · 🧭-패널        : 아무나 접근 (안내·도움말 패널)
   - 커뮤니티 카테고리
       · 💬-전체-커뮤니티 : 인증(1단계) 이상
       · 📢-공지         : 인증(1단계) 이상
+  - 매칭 카테고리
+      · 🧩-매칭        : 인증(2단계·서류 인증) 이상
   - 병원-커뮤니티 카테고리
       · 🏥-<병원명>     : 해당 병원 인증자만 (역할 기반)
         └ 기간 스레드 (예: "2020년 3월 ~ 2020년 5월")
@@ -45,6 +47,10 @@ COMMUNITY_CHANNEL_KEY = "ch:community"
 COMMUNITY_CHANNEL_NAME = "💬-전체-커뮤니티"
 NOTICE_CHANNEL_KEY = "ch:notice"
 NOTICE_CHANNEL_NAME = "📢-공지"
+MATCH_CATEGORY_KEY = "cat:match"
+MATCH_CATEGORY_NAME = "매칭"
+MATCH_CHANNEL_KEY = "ch:match"
+MATCH_CHANNEL_NAME = "🧩-매칭"
 
 _MAX_NAME = 100
 
@@ -306,40 +312,45 @@ class ChannelService:
             guild, NOTICE_CHANNEL_KEY, NOTICE_CHANNEL_NAME, community_cat, notice_ow
         )
 
-        # 3) 병원별 채널
+        # 3) 매칭 카테고리 (2단계 이상)
+        match_cat = await self._ensure_category(
+            guild, MATCH_CATEGORY_KEY, MATCH_CATEGORY_NAME
+        )
+        match_ow = self._overwrites(guild, public=False, view_roles=[tier2_role])
+        await self._ensure_text(
+            guild, MATCH_CHANNEL_KEY, MATCH_CHANNEL_NAME, match_cat, match_ow
+        )
+
+        # 4) 병원별 채널
         if settings.per_hospital_channels:
             for hospital in await self.bot.hospitals.list_all():
                 await self.ensure_hospital_channel(guild, hospital.id, hospital.name)
 
-    async def panel_channel(
-        self, guild: discord.Guild
+    async def managed_text_channel(
+        self, guild: discord.Guild, key: str
     ) -> Optional[discord.TextChannel]:
-        """상시 패널을 게시할 채널을 반환한다 (없으면 구성)."""
-        record = await self.bot.managed_channels.get(guild.id, PANEL_CHANNEL_KEY)
+        """논리 키에 해당하는 관리 대상 텍스트 채널을 반환한다 (없으면 구성)."""
+        record = await self.bot.managed_channels.get(guild.id, key)
         if record is not None:
             channel = guild.get_channel(record.discord_id)
             if isinstance(channel, discord.TextChannel):
                 return channel
         await self.ensure_all(guild)
-        record = await self.bot.managed_channels.get(guild.id, PANEL_CHANNEL_KEY)
+        record = await self.bot.managed_channels.get(guild.id, key)
         if record is not None:
             channel = guild.get_channel(record.discord_id)
             if isinstance(channel, discord.TextChannel):
                 return channel
         return None
 
+    async def panel_channel(
+        self, guild: discord.Guild
+    ) -> Optional[discord.TextChannel]:
+        """상시 안내 패널을 게시할 채널을 반환한다 (없으면 구성)."""
+        return await self.managed_text_channel(guild, PANEL_CHANNEL_KEY)
+
     async def verify_channel(
         self, guild: discord.Guild
     ) -> Optional[discord.TextChannel]:
-        record = await self.bot.managed_channels.get(guild.id, VERIFY_CHANNEL_KEY)
-        if record is not None:
-            channel = guild.get_channel(record.discord_id)
-            if isinstance(channel, discord.TextChannel):
-                return channel
-        await self.ensure_all(guild)
-        record = await self.bot.managed_channels.get(guild.id, VERIFY_CHANNEL_KEY)
-        if record is not None:
-            channel = guild.get_channel(record.discord_id)
-            if isinstance(channel, discord.TextChannel):
-                return channel
-        return None
+        """인증(서류 제출) 채널을 반환한다 (없으면 구성)."""
+        return await self.managed_text_channel(guild, VERIFY_CHANNEL_KEY)

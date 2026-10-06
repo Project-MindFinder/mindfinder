@@ -1,12 +1,12 @@
-"""상시 패널 코그: 고정 메시지 + 버튼/모달로 기능을 제공한다.
+"""상시 패널 코그: 용도별 채널에 고정 패널을 게시하고 버튼/모달로 기능을 제공한다.
 
-슬래시 커맨드 대신, 채널에 **항상 떠 있는 안내 패널**을 게시하고
+슬래시 커맨드 대신, **기능별 전용 채널**에 항상 떠 있는 안내 패널을 게시하고
 버튼을 눌러 기능을 사용하는 방식을 제공한다.
 (슬래시 커맨드도 그대로 유지되어 둘 다 사용할 수 있다.)
 
-- 패널 채널이 없으면 봇이 자동으로 만든다(PANEL_CHANNEL_ID 또는 AUTO_CREATE_PANEL_CHANNEL).
+- 채널이 없으면 봇이 자동으로 만든다(ChannelService.ensure_all).
 - 패널 메시지는 재시작해도 유지되도록 영구 뷰(persistent view)를 사용한다.
-- 서울대병원 사실확인서 PDF 를 패널 채널에 올리면 자동 진위확인 후 인증한다.
+- 서울대병원 사실확인서 PDF 는 패널 버튼 → **창(모달) 업로드** 로 제출한다.
 """
 
 from __future__ import annotations
@@ -20,20 +20,26 @@ from discord.ext import commands
 
 from bot.core import MindFinderBot
 from bot.services.channels import (
+    COMMUNITY_CHANNEL_KEY,
+    COMMUNITY_CHANNEL_NAME,
+    MATCH_CHANNEL_KEY,
+    MATCH_CHANNEL_NAME,
     PANEL_CHANNEL_KEY,
     PANEL_CHANNEL_NAME as MANAGED_PANEL_CHANNEL_NAME,
     VERIFY_CHANNEL_KEY,
+    VERIFY_CHANNEL_NAME,
 )
 from bot.services.matching import Candidate, MatchingService
 from bot.services.verification import VERIFICATION_LABEL, VerificationService
 from bot.ui.consent import build_consent_embed, ensure_consent
+from bot.ui.hospitals import HospitalSelectView
 from bot.utils.periods import PeriodError
 
 logger = logging.getLogger(__name__)
 
 # 패널 메시지를 식별하는 푸터 마커 (중복 게시 방지)
 PANEL_MARKER = "MindFinder 안내 패널"
-# 자동 생성할 패널 채널 이름
+# 자동 생성할 패널 채널 이름 (레거시 단일 패널용)
 PANEL_CHANNEL_NAME = "mindfinder-패널"
 # 후보/신청 목록에 한 번에 표시할 최대 항목 수
 MAX_ACTIONS = 5
@@ -108,6 +114,15 @@ class AdmissionModal(discord.ui.Modal, title="입원 이력 등록"):
             await interaction.response.send_message(f"⚠️ {exc}", ephemeral=True)
             return
 
+        # 자기 신고 등록 → 1단계 역할 부여 (전체 커뮤니티 열람)
+        if interaction.guild is not None:
+            member = interaction.guild.get_member(interaction.user.id)
+            if member is not None:
+                try:
+                    await self.bot.access.grant_tier(interaction.guild, member, 1)
+                except Exception:  # noqa: BLE001
+                    logger.exception("1단계 역할 부여 실패: user=%s", interaction.user.id)
+
         embed = discord.Embed(
             title="✅ 입원 이력이 등록되었습니다",
             description=(
@@ -117,8 +132,80 @@ class AdmissionModal(discord.ui.Modal, title="입원 이력 등록"):
             ),
             color=discord.Color.yellow(),
         )
-        embed.set_footer(text="서울대병원 서류를 올리면 자동 인증됩니다.")
+        embed.set_footer(text="서류 인증을 받으면 병원·기간 커뮤니티와 매칭을 이용할 수 있습니다.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# --------------------------------------------------------------------------- #
+# 모달: 서울대병원 사실확인서 PDF 업로드 (창에서 파일 선택)
+# --------------------------------------------------------------------------- #
+class SNUHTruthModal(discord.ui.Modal, title="서울대병원 서류 인증"):
+    """창(모달)에서 입퇴원 사실확인서 PDF 를 업로드받아 자동 진위확인한다."""
+
+    def __init__(self, bot: MindFinderBot, service: VerificationService) -> None:
+        super().__init__()
+        self.bot = bot
+        self.service = service
+        upload = discord.ui.FileUpload(
+            custom_id="mf:truth_pdf",
+            required=True,
+            max_values=1,
+        )
+        self.서류 = upload
+        self.add_item(
+            discord.ui.Label(
+                text="입퇴원 사실확인서 PDF (서울대병원 발급)",
+                description="발급받은 PDF 파일을 선택하세요. 원본은 저장하지 않습니다.",
+                component=upload,
+            )
+        )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        attachments = list(getattr(self.서류, "values", []) or [])
+        if not attachments:
+            await interaction.response.send_message(
+                "⚠️ PDF 파일을 첨부해주세요.", ephemeral=True
+            )
+            return
+        attachment = attachments[0]
+        if not attachment.filename.lower().endswith(".pdf"):
+            await interaction.response.send_message(
+                "⚠️ PDF 파일만 제출할 수 있습니다.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            pdf_bytes = await attachment.read()
+        except discord.HTTPException:
+            await interaction.followup.send(
+                "⚠️ 파일을 읽지 못했습니다. 다시 시도해주세요.", ephemeral=True
+            )
+            return
+
+        result = await self.service.auto_verify_pdf(
+            user_id=interaction.user.id,
+            filename=attachment.filename,
+            pdf_bytes=pdf_bytes,
+        )
+        if result.approved and interaction.guild is not None:
+            await grant_verified_access(
+                self.bot, interaction.guild, interaction.user.id, result
+            )
+
+        color = {
+            "green": discord.Color.green(),
+            "red": discord.Color.red(),
+            "orange": discord.Color.orange(),
+        }.get(result.color, discord.Color.orange())
+        embed = discord.Embed(
+            title=("✅ " if result.approved else "⚠️ ") + result.title,
+            description=result.detail,
+            color=color,
+        )
+        if result.approved:
+            embed.set_footer(text="정신건강의학과 입원 이력이 인증되었습니다.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -176,7 +263,7 @@ class CandidateView(discord.ui.View):
                             f"같은 병원·시기에 입원했던 동료가 매칭을 신청했습니다.\n"
                             f"병원: {other_adm.hospital.name}\n"
                             f"기간: {other_adm.period_text()}\n\n"
-                            "패널의 '받은 신청' 버튼에서 수락/거절할 수 있습니다."
+                            "매칭 패널의 '받은 신청' 버튼에서 수락/거절할 수 있습니다."
                         ),
                         color=discord.Color.pink(),
                     )
@@ -266,51 +353,97 @@ class IncomingRequestView(discord.ui.View):
 
 
 # --------------------------------------------------------------------------- #
-# 메인 패널 (영구 뷰)
+# 인증 패널 (영구 뷰) — 🔐-인증 채널
 # --------------------------------------------------------------------------- #
-class MainPanelView(discord.ui.View):
-    """채널에 상시 게시되는 안내 패널 (재시작해도 동작하도록 영구 뷰)."""
+class VerifyPanelView(discord.ui.View):
+    """인증 전용 패널: 입원 이력 등록 / 서류 인증 / 내 이력."""
 
     def __init__(self, bot: MindFinderBot) -> None:
         super().__init__(timeout=None)
         self.bot = bot
         self.vservice = VerificationService(bot)
-        self.mservice = MatchingService(bot)
 
-    # --- 인증 ---
     @discord.ui.button(
         label="입원 이력 등록", style=discord.ButtonStyle.primary,
-        custom_id="mf:admission", row=0,
+        custom_id="mf:v_admission", row=0,
     )
     async def admission(
         self, interaction: discord.Interaction, _button: discord.ui.Button
     ) -> None:
         async def _proceed(inner: discord.Interaction) -> None:
-            await inner.response.send_modal(
-                AdmissionModal(self.bot, self.vservice)
-            )
+            await inner.response.send_modal(AdmissionModal(self.bot, self.vservice))
 
-        # 인증 전 약관/개인정보 필수 동의
         if not await ensure_consent(self.bot, interaction, _proceed):
             return
         await _proceed(interaction)
 
     @discord.ui.button(
         label="서울대병원 서류 인증", style=discord.ButtonStyle.success,
-        custom_id="mf:truth", row=0,
+        custom_id="mf:v_truth", row=0,
     )
     async def truth(
         self, interaction: discord.Interaction, _button: discord.ui.Button
     ) -> None:
-        await interaction.response.send_message(
-            "📄 이 채널에 **서울대병원 입퇴원 사실확인서 PDF** 를 그대로 올려주세요.\n"
-            "자동으로 진위·정신과 여부를 확인해 인증해드립니다.",
-            ephemeral=True,
+        async def _proceed(inner: discord.Interaction) -> None:
+            await inner.response.send_modal(SNUHTruthModal(self.bot, self.vservice))
+
+        if not await ensure_consent(self.bot, interaction, _proceed):
+            return
+        await _proceed(interaction)
+
+    @discord.ui.button(
+        label="다른 병원 서류 인증", style=discord.ButtonStyle.secondary,
+        custom_id="mf:v_other", row=0,
+    )
+    async def other_hospital(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        async def _proceed(inner: discord.Interaction) -> None:
+            await inner.response.defer(ephemeral=True, thinking=True)
+            view = HospitalSelectView(
+                self.bot,
+                self._on_hospital_selected,
+                placeholder="서류를 제출할 병원을 선택하세요",
+            )
+            await view.load()
+            await inner.followup.send(
+                "**병원을 선택**하세요.\n"
+                "· 서울대학교병원 → 사실확인서 PDF 자동 진위확인\n"
+                "· 그 외 병원 → 관리자 수동 심사\n"
+                "목록에 없으면 **➕ 병원 추가** 버튼을 눌러주세요.",
+                view=view,
+                ephemeral=True,
+            )
+
+        if not await ensure_consent(self.bot, interaction, _proceed):
+            return
+        await _proceed(interaction)
+
+    async def _on_hospital_selected(
+        self, interaction: discord.Interaction, hospital_id: int
+    ) -> None:
+        hospital = await self.bot.hospitals.get_by_id(hospital_id)
+        if hospital is None:
+            await interaction.response.send_message(
+                "병원 정보를 찾을 수 없습니다.", ephemeral=True
+            )
+            return
+        if self.vservice.supports_auto_verify(hospital.name):
+            await interaction.response.send_message(
+                f"🏥 **{hospital.name}** 은(는) 자동 진위확인을 지원합니다.\n"
+                "위의 **서울대병원 서류 인증** 버튼을 눌러 PDF 를 업로드해주세요.",
+                ephemeral=True,
+            )
+            return
+        from bot.ui.hospitals import ManualProofModal
+
+        await interaction.response.send_modal(
+            ManualProofModal(self.bot, hospital.id, hospital.name)
         )
 
     @discord.ui.button(
         label="내 이력", style=discord.ButtonStyle.secondary,
-        custom_id="mf:history", row=0,
+        custom_id="mf:v_history", row=0,
     )
     async def history(
         self, interaction: discord.Interaction, _button: discord.ui.Button
@@ -334,10 +467,21 @@ class MainPanelView(discord.ui.View):
             )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # --- 매칭 ---
+
+# --------------------------------------------------------------------------- #
+# 매칭 패널 (영구 뷰) — 🧩-매칭 채널
+# --------------------------------------------------------------------------- #
+class MatchPanelView(discord.ui.View):
+    """매칭 전용 패널: 매칭 희망 설정 / 동료 찾기 / 받은 신청 / 내 채널."""
+
+    def __init__(self, bot: MindFinderBot) -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.mservice = MatchingService(bot)
+
     @discord.ui.button(
-        label="매칭 희망 켜기", style=discord.ButtonStyle.primary,
-        custom_id="mf:match_on", row=1,
+        label="매칭 희망 켜기", style=discord.ButtonStyle.success,
+        custom_id="mf:m_on", row=0,
     )
     async def match_on(
         self, interaction: discord.Interaction, _button: discord.ui.Button
@@ -349,7 +493,7 @@ class MainPanelView(discord.ui.View):
 
     @discord.ui.button(
         label="매칭 희망 끄기", style=discord.ButtonStyle.secondary,
-        custom_id="mf:match_off", row=1,
+        custom_id="mf:m_off", row=0,
     )
     async def match_off(
         self, interaction: discord.Interaction, _button: discord.ui.Button
@@ -361,7 +505,7 @@ class MainPanelView(discord.ui.View):
 
     @discord.ui.button(
         label="동료 찾기", style=discord.ButtonStyle.primary,
-        custom_id="mf:find", row=1,
+        custom_id="mf:m_find", row=1,
     )
     async def find(
         self, interaction: discord.Interaction, _button: discord.ui.Button
@@ -403,10 +547,9 @@ class MainPanelView(discord.ui.View):
             ephemeral=True,
         )
 
-    # --- 받은 신청 / 채널 ---
     @discord.ui.button(
         label="받은 신청", style=discord.ButtonStyle.success,
-        custom_id="mf:incoming", row=2,
+        custom_id="mf:m_incoming", row=2,
     )
     async def incoming(
         self, interaction: discord.Interaction, _button: discord.ui.Button
@@ -440,7 +583,7 @@ class MainPanelView(discord.ui.View):
 
     @discord.ui.button(
         label="내 매칭 채널", style=discord.ButtonStyle.secondary,
-        custom_id="mf:channels", row=2,
+        custom_id="mf:m_channels", row=2,
     )
     async def channels(
         self, interaction: discord.Interaction, _button: discord.ui.Button
@@ -466,20 +609,65 @@ class MainPanelView(discord.ui.View):
             embed.add_field(name=ch.name, value=ch.mention, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
+# --------------------------------------------------------------------------- #
+# 커뮤니티 패널 (영구 뷰) — 💬-전체-커뮤니티 채널
+# --------------------------------------------------------------------------- #
+class CommunityPanelView(discord.ui.View):
+    """커뮤니티 안내 패널: 병원별 채널/기간 스레드 안내."""
+
+    def __init__(self, bot: MindFinderBot) -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+
     @discord.ui.button(
-        label="약관·개인정보", style=discord.ButtonStyle.secondary,
-        custom_id="mf:consent_info", row=3,
+        label="병원별 채널 안내", style=discord.ButtonStyle.primary,
+        custom_id="mf:c_hospital", row=0,
     )
-    async def consent_info(
+    async def hospital_guide(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        hospitals = await self.bot.hospitals.list_all()
+        embed = discord.Embed(
+            title="🏥 병원별 커뮤니티 안내",
+            description=(
+                "서류 인증을 받으면 **내가 인증받은 병원**의 전용 채널이 열립니다.\n"
+                "같은 시기(입원 기간)에 입원했던 분들과 이야기할 수 있습니다."
+            ),
+            color=discord.Color.teal(),
+        )
+        names = ", ".join(h.name for h in hospitals[:20]) or "아직 등록된 병원이 없습니다."
+        embed.add_field(name="등록된 병원", value=names, inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(
+        label="매칭 안내", style=discord.ButtonStyle.secondary,
+        custom_id="mf:c_match", row=0,
+    )
+    async def match_guide(
         self, interaction: discord.Interaction, _button: discord.ui.Button
     ) -> None:
         await interaction.response.send_message(
-            embed=build_consent_embed(self.bot), ephemeral=True
+            "🧩 매칭은 **서류 인증자(2단계)** 만 이용할 수 있습니다.\n"
+            "매칭 패널에서 '매칭 희망 켜기' → '동료 찾기' 로 신청하세요.\n"
+            "연락처는 봇이 저장하지 않으며, 매칭 성사 시 비공개 채널에서 직접 대화합니다.",
+            ephemeral=True,
         )
 
+
+# --------------------------------------------------------------------------- #
+# 안내 패널 (영구 뷰) — 🧭-패널 채널
+# --------------------------------------------------------------------------- #
+class HelpPanelView(discord.ui.View):
+    """안내·도움말 패널: 사용법, 약관·개인정보."""
+
+    def __init__(self, bot: MindFinderBot) -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+
     @discord.ui.button(
-        label="도움 안내", style=discord.ButtonStyle.secondary,
-        custom_id="mf:help", row=2,
+        label="사용법", style=discord.ButtonStyle.primary,
+        custom_id="mf:h_help", row=0,
     )
     async def help_button(
         self, interaction: discord.Interaction, _button: discord.ui.Button
@@ -487,22 +675,23 @@ class MainPanelView(discord.ui.View):
         embed = discord.Embed(
             title="🧭 MindFinder 사용법",
             description=(
-                "이 패널의 버튼으로 모든 기능을 사용할 수 있습니다.\n"
+                "각 기능은 **전용 채널**의 패널 버튼으로 사용합니다.\n"
                 "슬래시 명령어도 그대로 사용할 수 있습니다."
             ),
             color=discord.Color.teal(),
         )
         embed.add_field(
-            name="인증",
+            name="🔐 인증",
             value=(
-                "**입원 이력 등록** — 병원·기간을 입력해 이력 등록\n"
+                "**입원 이력 등록** — 병원·기간 입력 (자기 신고)\n"
                 "**서울대병원 서류 인증** — 사실확인서 PDF 자동 진위확인\n"
-                "**내 이력** — 등록한 이력 확인"
+                "**다른 병원 서류 인증** — 관리자 수동 심사\n"
+                "**내 이력** — 등록 이력 확인"
             ),
             inline=False,
         )
         embed.add_field(
-            name="매칭",
+            name="🧩 매칭",
             value=(
                 "**매칭 희망 켜기/끄기** — 매칭 참여 여부\n"
                 "**동료 찾기** — 같은 병원·시기 동료에게 신청\n"
@@ -516,130 +705,250 @@ class MainPanelView(discord.ui.View):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    @discord.ui.button(
+        label="약관·개인정보", style=discord.ButtonStyle.secondary,
+        custom_id="mf:h_consent", row=0,
+    )
+    async def consent_info(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        await interaction.response.send_message(
+            embed=build_consent_embed(self.bot), ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="위기 상담 안내", style=discord.ButtonStyle.danger,
+        custom_id="mf:h_crisis", row=0,
+    )
+    async def crisis_help(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        await interaction.response.send_message(
+            "지금 많이 힘드시다면 아래에 연락해 주세요.\n"
+            "· 자살예방 상담전화 **109** (24시간)\n"
+            "· 정신건강 상담전화 **1577-0199** (24시간)\n"
+            "· 생명의전화 **1588-9191**\n"
+            "당신의 이야기를 들어줄 사람이 있습니다.",
+            ephemeral=True,
+        )
+
 
 # --------------------------------------------------------------------------- #
-# 코그
+# 공용 헬퍼: 진위확인 통과자 접근 권한 부여
+# --------------------------------------------------------------------------- #
+async def grant_verified_access(
+    bot: MindFinderBot, guild: discord.Guild, user_id: int, result=None
+) -> None:
+    """자동 진위확인 통과자에게 2단계 역할 + 병원 역할/채널을 부여한다."""
+    member = guild.get_member(user_id)
+    if member is None:
+        return
+    # 2단계(서류 인증) 역할 (설정된 VERIFIED_ROLE_ID 가 있으면 함께 부여)
+    try:
+        await bot.access.grant_tier(guild, member, 2)
+    except Exception:  # noqa: BLE001
+        logger.exception("2단계 역할 부여 실패: user=%s", user_id)
+    role_id = bot.settings.verified_role_id
+    if role_id:
+        role = guild.get_role(role_id)
+        if role is not None:
+            try:
+                await member.add_roles(role, reason="자동 진위확인 인증")
+            except discord.Forbidden:
+                logger.warning("인증 역할 부여 권한 없음: user=%s", user_id)
+
+    # 병원 역할 + 병원 채널 확보
+    hospital_name = getattr(result, "hospital_name", None)
+    if not hospital_name:
+        return
+    hospital = await bot.hospitals.get_by_name(hospital_name)
+    if hospital is None:
+        hospital = await VerificationService(bot).resolve_hospital(hospital_name)
+    try:
+        await bot.access.grant_hospital_role(
+            guild, member, hospital.id, hospital.name
+        )
+        await bot.channel_service.ensure_hospital_channel(
+            guild, hospital.id, hospital.name
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("병원 역할/채널 처리 실패: hospital=%s", hospital.id)
+
+
+# --------------------------------------------------------------------------- #
+# 코그: 패널 게시 및 패널 채널 PDF 자동 진위확인
 # --------------------------------------------------------------------------- #
 class PanelCog(commands.Cog):
-    """상시 패널 게시 및 패널 채널의 PDF 자동 진위확인."""
+    """용도별 채널에 상시 패널을 게시하고, 인증 채널의 PDF 를 자동 진위확인한다."""
 
     def __init__(self, bot: MindFinderBot) -> None:
         self.bot = bot
         self.vservice = VerificationService(bot)
         # 영구 뷰 등록 (재시작 후에도 버튼이 동작하도록)
-        bot.add_view(MainPanelView(bot))
-        self._panel_ready = False
+        bot.add_view(VerifyPanelView(bot))
+        bot.add_view(MatchPanelView(bot))
+        bot.add_view(CommunityPanelView(bot))
+        bot.add_view(HelpPanelView(bot))
+        self._panels_ready = False
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
-        if self._panel_ready:
+        if self._panels_ready:
             return
-        self._panel_ready = True
+        self._panels_ready = True
         for guild in self.bot.guilds:
-            # 1) 용도별 채널/카테고리 전체 구성 (인증/패널/커뮤니티/공지/병원별)
+            # 1) 용도별 채널/카테고리 전체 구성 (인증/커뮤니티/매칭/안내/병원별)
             try:
                 await self.bot.channel_service.ensure_all(guild)
             except Exception:  # noqa: BLE001 - 한 서버 실패가 전체를 막지 않도록
                 logger.exception("채널 자동 구성 실패: guild=%s", guild.id)
-            # 2) 상시 패널 게시
-            try:
-                await self.ensure_panel(guild)
-            except Exception:  # noqa: BLE001 - 한 서버 실패가 전체를 막지 않도록
-                logger.exception("패널 게시 실패: guild=%s", guild.id)
+            # 2) 기능별 패널 게시
+            await self.ensure_panels(guild)
 
-    async def _managed_channel_id(
+    # ---------- 패널 게시 ----------
+
+    async def ensure_panels(self, guild: discord.Guild) -> None:
+        """기능별 채널에 상시 패널을 게시/갱신한다."""
+        specs = [
+            (VERIFY_CHANNEL_KEY, PANEL_MARKER_VERIFY, self._build_verify_embed, VerifyPanelView),
+            (MATCH_CHANNEL_KEY, PANEL_MARKER_MATCH, self._build_match_embed, MatchPanelView),
+            (
+                COMMUNITY_CHANNEL_KEY,
+                PANEL_MARKER_COMMUNITY,
+                self._build_community_embed,
+                CommunityPanelView,
+            ),
+            (PANEL_CHANNEL_KEY, PANEL_MARKER_HELP, self._build_help_embed, HelpPanelView),
+        ]
+        for key, marker, embed_builder, view_cls in specs:
+            channel = await self._managed_channel(guild, key)
+            if channel is None:
+                continue
+            await self._post_panel(channel, marker, embed_builder(), view_cls(self.bot))
+
+    async def _managed_channel(
         self, guild: discord.Guild, key: str
-    ) -> Optional[int]:
-        """설정(.env) 또는 DB에 기록된 관리 대상 채널 ID를 반환한다.
-
-        패널/인증 채널은 시작 시 [`ChannelService.ensure_all()`] 가 구성하면서
-        `managed_channels` 에 기록된다. 설정값이 있으면 그 값을 우선한다.
-        """
+    ) -> Optional[discord.TextChannel]:
+        """관리 대상 채널을 반환한다 (설정값 우선, 없으면 managed_channels)."""
         settings = self.bot.settings
         if key == PANEL_CHANNEL_KEY and settings.panel_channel_id:
-            return settings.panel_channel_id
-        if key == VERIFY_CHANNEL_KEY and settings.verification_channel_id:
-            return settings.verification_channel_id
-        record = await self.bot.managed_channels.get(guild.id, key)
-        return record.discord_id if record is not None else None
-
-    async def _resolve_panel_channel(
-        self, guild: discord.Guild
-    ) -> Optional[discord.TextChannel]:
-        """패널 채널을 찾거나, 없으면 생성한다."""
-        settings = self.bot.settings
-        # 1) 설정된 채널 ID
-        if settings.panel_channel_id:
             ch = guild.get_channel(settings.panel_channel_id)
             if isinstance(ch, discord.TextChannel):
                 return ch
-            logger.warning(
-                "PANEL_CHANNEL_ID(%s) 채널을 찾을 수 없습니다.", settings.panel_channel_id
-            )
-        # 2) ChannelService 가 자동 구성한 관리 대상 채널 재사용 (중복 생성 방지)
-        record = await self.bot.managed_channels.get(guild.id, PANEL_CHANNEL_KEY)
-        if record is not None:
-            managed = guild.get_channel(record.discord_id)
-            if isinstance(managed, discord.TextChannel):
-                return managed
-        # 3) 이름으로 검색 (자동 구성 이름 → 레거시 이름 순)
-        for ch in guild.text_channels:
-            if ch.name in (MANAGED_PANEL_CHANNEL_NAME, PANEL_CHANNEL_NAME):
+        if key == VERIFY_CHANNEL_KEY and settings.verification_channel_id:
+            ch = guild.get_channel(settings.verification_channel_id)
+            if isinstance(ch, discord.TextChannel):
                 return ch
-        # 4) 자동 생성
-        if not settings.auto_create_panel_channel:
-            return None
-        try:
-            overwrites = {
-                guild.default_role: discord.PermissionOverwrite(
-                    view_channel=True, send_messages=True, read_message_history=True
-                ),
-                guild.me: discord.PermissionOverwrite(
-                    view_channel=True,
-                    send_messages=True,
-                    manage_messages=True,
-                    embed_links=True,
-                    read_message_history=True,
-                ),
-            }
-            channel = await guild.create_text_channel(
-                name=PANEL_CHANNEL_NAME,
-                overwrites=overwrites,
-                topic="MindFinder 안내 패널 · 버튼으로 이용하세요.",
-                reason="MindFinder 패널 채널 자동 생성",
-            )
-            logger.info("패널 채널 자동 생성: guild=%s channel=%s", guild.id, channel.id)
-            return channel
-        except discord.Forbidden:
-            logger.warning("패널 채널 생성 권한 없음: guild=%s", guild.id)
-            return None
-        except discord.HTTPException:
-            logger.exception("패널 채널 생성 실패: guild=%s", guild.id)
-            return None
+        return await self.bot.channel_service.managed_text_channel(guild, key)
 
-    def _build_panel_embed(self) -> discord.Embed:
+    async def _post_panel(
+        self,
+        channel: discord.TextChannel,
+        marker: str,
+        embed: discord.Embed,
+        view: discord.ui.View,
+    ) -> None:
+        """채널에 패널 메시지를 게시하거나 기존 메시지를 갱신한다."""
+        existing: Optional[discord.Message] = None
+        try:
+            async for msg in channel.history(limit=50):
+                if (
+                    msg.author.id == self.bot.user.id
+                    and msg.embeds
+                    and msg.embeds[0].footer
+                    and msg.embeds[0].footer.text == marker
+                ):
+                    existing = msg
+                    break
+        except discord.HTTPException:
+            logger.exception("패널 메시지 조회 실패: channel=%s", channel.id)
+        try:
+            if existing is not None:
+                await existing.edit(embed=embed, view=view)
+                logger.info("패널 갱신: channel=%s marker=%s", channel.id, marker)
+            else:
+                await channel.send(embed=embed, view=view)
+                logger.info("패널 게시: channel=%s marker=%s", channel.id, marker)
+        except discord.HTTPException:
+            logger.exception("패널 전송 실패: channel=%s", channel.id)
+
+    # ---------- 패널 임베드 ----------
+
+    def _build_verify_embed(self) -> discord.Embed:
         embed = discord.Embed(
-            title="🧭 MindFinder 안내 패널",
+            title="🔐 인증",
+            description=(
+                "이곳에서 **입원 이력**을 등록하고 **서류 인증**을 받습니다.\n"
+                "아래 버튼을 누르면 입력 창이 열립니다."
+            ),
+            color=discord.Color.green(),
+        )
+        embed.add_field(
+            name="① 입원 이력 등록 (자기 신고)",
+            value="병원·기간을 입력하면 1단계 인증 → **전체 커뮤니티** 이용",
+            inline=False,
+        )
+        embed.add_field(
+            name="② 서류 인증 (2단계)",
+            value=(
+                "**서울대병원** 사실확인서 PDF → 자동 진위확인\n"
+                "**그 외 병원** → 관리자 수동 심사\n"
+                "2단계 인증 → **병원·기간 커뮤니티 + 매칭** 이용"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text=PANEL_MARKER_VERIFY)
+        return embed
+
+    def _build_match_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="🧩 매칭",
+            description=(
+                "같은 병원·시기에 입원했던 동료와 연결됩니다. "
+                "(서류 인증자 전용)"
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(
+            name="이용 순서",
+            value=(
+                "1) **매칭 희망 켜기**\n"
+                "2) **동료 찾기** → 후보에게 신청\n"
+                "3) 상대가 **수락**하면 비공개 채널 개설"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text=PANEL_MARKER_MATCH)
+        return embed
+
+    def _build_community_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="💬 전체 커뮤니티",
+            description=(
+                "인증(1단계) 이상이면 이용할 수 있는 전체 커뮤니티입니다.\n"
+                "서류 인증을 받으면 **병원별·기간별** 채널도 열립니다."
+            ),
+            color=discord.Color.teal(),
+        )
+        embed.set_footer(text=PANEL_MARKER_COMMUNITY)
+        return embed
+
+    def _build_help_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="🧭 MindFinder 안내",
             description=(
                 "폐쇄병동 입원 경험자들을 위한 커뮤니티입니다.\n"
-                "아래 **버튼**을 눌러 이용하세요."
+                "기능별 채널의 패널 버튼으로 이용하세요."
             ),
             color=discord.Color.teal(),
         )
         embed.add_field(
-            name="① 인증",
+            name="채널 안내",
             value=(
-                "**입원 이력 등록** — 병원·기간 입력\n"
-                "**서울대병원 서류 인증** — 사실확인서 PDF 자동 검증\n"
-                "**내 이력** — 등록 이력 확인"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="② 매칭",
-            value=(
-                "**매칭 희망 켜기/끄기** · **동료 찾기**\n"
-                "**받은 신청** · **내 매칭 채널**"
+                "🔐 **인증** — 이력 등록·서류 인증\n"
+                "🧩 **매칭** — 동료 찾기 (서류 인증자)\n"
+                "💬 **전체 커뮤니티** — 인증자 커뮤니티\n"
+                "🏥 **병원-커뮤니티** — 병원·기간별"
             ),
             inline=False,
         )
@@ -651,59 +960,23 @@ class PanelCog(commands.Cog):
             ),
             inline=False,
         )
-        embed.set_footer(text=PANEL_MARKER)
+        embed.set_footer(text=PANEL_MARKER_HELP)
         return embed
 
-    async def ensure_panel(self, guild: discord.Guild) -> None:
-        """패널 채널을 확보하고 패널 메시지를 게시/갱신한다."""
-        channel = await self._resolve_panel_channel(guild)
-        if channel is None:
-            return
-
-        embed = self._build_panel_embed()
-        view = MainPanelView(self.bot)
-
-        # 기존 패널 메시지 찾기 (푸터 마커로 식별)
-        existing: Optional[discord.Message] = None
-        try:
-            async for msg in channel.history(limit=50):
-                if (
-                    msg.author.id == self.bot.user.id
-                    and msg.embeds
-                    and msg.embeds[0].footer
-                    and msg.embeds[0].footer.text == PANEL_MARKER
-                ):
-                    existing = msg
-                    break
-        except discord.HTTPException:
-            logger.exception("패널 메시지 조회 실패: channel=%s", channel.id)
-
-        try:
-            if existing is not None:
-                await existing.edit(embed=embed, view=view)
-                logger.info("패널 메시지 갱신: channel=%s", channel.id)
-            else:
-                await channel.send(embed=embed, view=view)
-                logger.info("패널 메시지 게시: channel=%s", channel.id)
-        except discord.HTTPException:
-            logger.exception("패널 메시지 전송 실패: channel=%s", channel.id)
-
-    # ---------- 패널 채널의 PDF 자동 진위확인 ----------
+    # ---------- 인증 채널의 PDF 자동 진위확인 (메시지 업로드 지원) ----------
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        """패널 채널에 올라온 PDF 를 자동 진위확인한다."""
+        """인증 채널에 올라온 서울대병원 PDF 를 자동 진위확인한다."""
         if message.author.bot or message.guild is None:
             return
         if not message.attachments:
             return
 
-        # 패널 채널에서만 동작 (자동 구성된 채널 포함)
-        settings = self.bot.settings
-        panel_channel_id = await self._managed_channel_id(
-            message.guild, PANEL_CHANNEL_KEY
+        verify_channel_id = await self._managed_channel_id(
+            message.guild, VERIFY_CHANNEL_KEY
         )
-        if panel_channel_id is None or message.channel.id != panel_channel_id:
+        if verify_channel_id is None or message.channel.id != verify_channel_id:
             return
 
         pdfs = [
@@ -711,8 +984,7 @@ class PanelCog(commands.Cog):
         ]
         if not pdfs:
             return
-
-        if not settings.snuh_truth_enabled:
+        if not self.bot.settings.snuh_truth_enabled:
             return
 
         attachment = pdfs[0]
@@ -728,7 +1000,9 @@ class PanelCog(commands.Cog):
             pdf_bytes=pdf_bytes,
         )
         if result.approved:
-            await self._grant_verified_access(message.guild, message.author.id, result)
+            await grant_verified_access(
+                self.bot, message.guild, message.author.id, result
+            )
 
         color = {
             "green": discord.Color.green(),
@@ -745,48 +1019,22 @@ class PanelCog(commands.Cog):
         except discord.HTTPException:
             logger.warning("진위확인 결과 응답 실패: channel=%s", message.channel.id)
 
-    async def _grant_verified_access(
-        self, guild: discord.Guild, user_id: int, result=None
-    ) -> None:
-        """자동 진위확인 통과자에게 2단계 역할 + 병원 역할/채널을 부여한다."""
-        member = guild.get_member(user_id)
-        if member is None:
-            return
-        # 2단계(서류 인증) 역할 (설정된 VERIFIED_ROLE_ID 가 있으면 함께 부여)
-        try:
-            await self.bot.access.grant_tier(guild, member, 2)
-        except Exception:  # noqa: BLE001
-            logger.exception("2단계 역할 부여 실패: user=%s", user_id)
-        role_id = self.bot.settings.verified_role_id
-        if role_id:
-            role = guild.get_role(role_id)
-            if role is not None:
-                try:
-                    await member.add_roles(role, reason="자동 진위확인 인증")
-                except discord.Forbidden:
-                    logger.warning("인증 역할 부여 권한 없음: user=%s", user_id)
-
-        # 병원 역할 + 병원 채널 확보
-        hospital_name = getattr(result, "hospital_name", None)
-        if not hospital_name:
-            return
-        hospital = await self.bot.hospitals.get_by_name(hospital_name)
-        if hospital is None:
-            hospital = await self.vservice.resolve_hospital(hospital_name)
-        try:
-            await self.bot.access.grant_hospital_role(
-                guild, member, hospital.id, hospital.name
-            )
-            await self.bot.channel_service.ensure_hospital_channel(
-                guild, hospital.id, hospital.name
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("병원 역할/채널 처리 실패: hospital=%s", hospital.id)
+    async def _managed_channel_id(
+        self, guild: discord.Guild, key: str
+    ) -> Optional[int]:
+        """설정(.env) 또는 DB에 기록된 관리 대상 채널 ID를 반환한다."""
+        settings = self.bot.settings
+        if key == PANEL_CHANNEL_KEY and settings.panel_channel_id:
+            return settings.panel_channel_id
+        if key == VERIFY_CHANNEL_KEY and settings.verification_channel_id:
+            return settings.verification_channel_id
+        record = await self.bot.managed_channels.get(guild.id, key)
+        return record.discord_id if record is not None else None
 
     # ---------- 관리자: 패널 수동 재게시 ----------
 
     @app_commands.command(
-        name="패널", description="[관리자] 안내 패널을 이 채널에 (재)게시합니다."
+        name="패널", description="[관리자] 기능별 안내 패널을 (재)게시합니다."
     )
     async def repost_panel(self, interaction: discord.Interaction) -> None:
         if not interaction.user.guild_permissions.administrator:
@@ -800,9 +1048,10 @@ class PanelCog(commands.Cog):
             )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        embed = self._build_panel_embed()
-        await interaction.channel.send(embed=embed, view=MainPanelView(self.bot))
-        await interaction.followup.send("✅ 패널을 게시했습니다.", ephemeral=True)
+        await self.ensure_panels(interaction.guild)
+        await interaction.followup.send(
+            "✅ 기능별 안내 패널을 게시했습니다.", ephemeral=True
+        )
 
     # ---------- 관리자: 채널 구성 재실행 ----------
 
@@ -823,7 +1072,7 @@ class PanelCog(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             await self.bot.channel_service.ensure_all(interaction.guild)
-            await self.ensure_panel(interaction.guild)
+            await self.ensure_panels(interaction.guild)
         except Exception:  # noqa: BLE001
             logger.exception("채널 구성 실패: guild=%s", interaction.guild.id)
             await interaction.followup.send(
@@ -835,6 +1084,13 @@ class PanelCog(commands.Cog):
         await interaction.followup.send(
             "✅ 용도별 채널/카테고리 구성을 완료했습니다.", ephemeral=True
         )
+
+
+# 기능별 패널 마커 (중복 게시 방지용, 임베드 푸터에 기록)
+PANEL_MARKER_VERIFY = "MindFinder · 인증 패널"
+PANEL_MARKER_MATCH = "MindFinder · 매칭 패널"
+PANEL_MARKER_COMMUNITY = "MindFinder · 커뮤니티 패널"
+PANEL_MARKER_HELP = "MindFinder 안내 패널"
 
 
 async def setup(bot: commands.Bot) -> None:
