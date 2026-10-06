@@ -1,0 +1,43 @@
+# 환경변수 / 비밀값 (절대 커밋 금지)
+.env
+*.env
+!.env.example
+
+# SQLite 데이터베이스 파일 및 백업
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+backups/
+
+# 로그
+logs/
+*.log
+
+# 파이썬
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+
+# 테스트/커버리지
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 에디터/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

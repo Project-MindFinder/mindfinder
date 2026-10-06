@@ -1,0 +1,31 @@
+[project]
+name = "mindfinder"
+version = "0.1.0"
+description = "폐쇄병동 입원 경험자 간 커뮤니티 및 매칭 디스코드 봇"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+
+dependencies = [
+    "discord.py>=2.4.0,<3.0.0",
+    "python-dotenv>=1.0.1",
+    "aiosqlite>=0.20.0",
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["bot", "bot.db", "bot.cogs", "bot.data"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
