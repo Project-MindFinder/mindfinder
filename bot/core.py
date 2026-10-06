@@ -29,6 +29,7 @@ from bot.db.repositories import (
     MatchChannelRepository,
     MatchPreferenceRepository,
     MatchRequestRepository,
+    UserDisplayPreferenceRepository,
     UserRepository,
     VerificationRepository,
 )
