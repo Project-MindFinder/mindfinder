@@ -164,11 +164,13 @@ class VerificationService:
         filename: str,
         pdf_bytes: bytes,
         admission_id: Optional[int] = None,
+        hospital_id: Optional[int] = None,
     ) -> AutoVerifyResult:
         """서울대병원 입퇴원 사실확인서 PDF 를 자동 진위확인한다.
 
-        ``admission_id`` 가 주어지면 그 이력을 사용하고(기간은 문서에서 추출),
-        없으면 문서에서 추출한 병원·기간으로 새 이력을 만든다.
+        ``hospital_id``(사용자가 선택한 병원)가 주어지면 **그 병원**으로 이력을
+        만들고(기간은 문서에서 추출), 없으면 문서에서 판별한 병원을 사용한다.
+        ``admission_id`` 가 주어지면 그 이력을 사용한다.
         호출자가 인증 역할 부여만 하면 되도록 결과를 반환한다.
         """
         settings = self.bot.settings
@@ -246,11 +248,21 @@ class VerificationService:
         # 6) 중복 문서 방지 (문서확인번호)
         existing = await self.bot.verifications.find_by_document_no(cert.document_no)
         if existing is not None:
+            if existing.user_id == user_id:
+                detail = (
+                    "이미 **본인이** 이 문서로 인증을 완료했습니다. "
+                    "같은 서류로는 다시 인증할 수 없습니다."
+                )
+            else:
+                detail = (
+                    "이미 등록된 문서입니다(다른 사용자). 동일한 서류로는 "
+                    "중복 인증할 수 없습니다."
+                )
             return AutoVerifyResult(
                 approved=False,
                 title="중복 문서",
                 color="orange",
-                detail="이미 등록된 문서입니다. 동일한 서류로는 중복 인증할 수 없습니다.",
+                detail=detail,
                 document_no=cert.document_no,
             )
 
@@ -276,11 +288,17 @@ class VerificationService:
             )
         start_year, start_month, end_year, end_month = period
 
-        # 서류에서 판별한 병원(키워드)을 대표 병원으로 정규화한다.
+        # 사용자가 선택한 병원(hospital_id)이 있으면 그 병원을 우선한다.
+        # 없으면 서류에서 판별한 병원(키워드)을 대표 병원으로 정규화한다.
         # 서울대학교어린이병원(7A병동)과 서울대학교병원(62병동)은 서로 다른 병동이다.
-        hospital = await self.resolve_hospital(
-            cert.hospital_name or "서울대학교병원"
-        )
+        if hospital_id is not None:
+            hospital = await self.bot.hospitals.get_by_id(hospital_id)
+        else:
+            hospital = None
+        if hospital is None:
+            hospital = await self.resolve_hospital(
+                cert.hospital_name or "서울대학교병원"
+            )
         hospital_display = hospital_utils.hospital_display_name(hospital.name)
         await self.bot.user_repo.ensure_user(user_id)
         if admission_id is None:

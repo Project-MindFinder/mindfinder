@@ -646,6 +646,7 @@ class UnifiedVerifyModal(discord.ui.Modal, title="서류 인증"):
             user_id=interaction.user.id,
             filename=attachment.filename,
             pdf_bytes=pdf_bytes,
+            hospital_id=self.hospital_id,
         )
         if result.approved and interaction.guild is not None:
             await grant_verified_access(
@@ -845,7 +846,7 @@ async def notify_admins_of_other_request(
             continue
         view = OtherVerifyReviewView(bot, request_id)
         try:
-            await channel.send(
+            msg = await channel.send(
                 f"🟠 **기타 방법 인증 신청** (`{request_id}`)\n"
                 f"· 신청자: <@{user_id}>\n"
                 f"· 병원: **{hospital_display_name(hospital_name)}**\n"
@@ -854,6 +855,7 @@ async def notify_admins_of_other_request(
                 "확인 후 승인하면 2단계 인증이 부여됩니다.",
                 view=view,
             )
+            await bot.verifications.set_proof_message(request_id, channel.id, msg.id)
         except discord.HTTPException:
             logger.exception("기타 인증 알림 실패: request=%s", request_id)
         return
@@ -878,7 +880,7 @@ async def notify_admins_of_document_request(
         view = DocumentReviewView(bot, request_id)
         try:
             file = discord.File(io.BytesIO(data), filename=filename or "서류.pdf")
-            await channel.send(
+            msg = await channel.send(
                 content=(
                     f"📄 **서류 심사 접수** (`{request_id}`)\n"
                     f"· 제출자: <@{user_id}>\n"
@@ -888,9 +890,25 @@ async def notify_admins_of_document_request(
                 file=file,
                 view=view,
             )
+            # 승인/거절 즉시 이 메시지(자료)를 삭제할 수 있도록 기록한다.
+            await bot.verifications.set_proof_message(request_id, channel.id, msg.id)
         except discord.HTTPException:
             logger.exception("서류 심사 알림 실패: request=%s", request_id)
         return
+
+
+async def delete_review_message(bot: MindFinderBot, request_id: int) -> None:
+    """심사 요청의 관리자 검토 메시지(자료 포함)를 삭제한다."""
+    req = await bot.verifications.get_by_id(request_id)
+    if req is None or not req.proof_channel_id or not req.proof_message_id:
+        return
+    channel = bot.get_channel(req.proof_channel_id)
+    if isinstance(channel, discord.TextChannel):
+        try:
+            msg = await channel.fetch_message(req.proof_message_id)
+            await msg.delete()
+        except discord.HTTPException:
+            logger.debug("심사 메시지 삭제 실패: %s", req.proof_message_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -1116,6 +1134,8 @@ class OtherVerifyReviewView(discord.ui.View):
         await interaction.response.send_message(
             "✅ 기타 방법 인증을 승인했습니다.", ephemeral=True
         )
+        # 승인 즉시 관리자 검토 메시지(자료)를 삭제한다.
+        await delete_review_message(self.bot, self.request_id)
         try:
             user = await self.bot.fetch_user(req.user_id)
             await user.send(
@@ -1143,6 +1163,8 @@ class OtherVerifyReviewView(discord.ui.View):
         if req.admission_id:
             await self.bot.admissions.set_verification(req.admission_id, "rejected")
         await interaction.response.send_message("기타 인증을 거절했습니다.", ephemeral=True)
+        # 거절 즉시 관리자 검토 메시지(자료)를 삭제한다.
+        await delete_review_message(self.bot, self.request_id)
         try:
             user = await self.bot.fetch_user(req.user_id)
             await user.send(
@@ -1223,6 +1245,8 @@ class ManualApproveModal(discord.ui.Modal, title="수동 인증 승인 (병원·
             f"✅ 심사 #{self.request_id} 승인 — **{display}** 이력이 생성되었습니다.",
             ephemeral=True,
         )
+        # 승인 즉시 관리자 검토 메시지(자료)를 삭제한다.
+        await delete_review_message(self.bot, self.request_id)
 
 
 class DocumentReviewView(discord.ui.View):
@@ -1276,6 +1300,8 @@ class DocumentReviewView(discord.ui.View):
             self.request_id, "rejected", interaction.user.id
         )
         await interaction.response.send_message("서류 심사를 거절했습니다.", ephemeral=True)
+        # 거절 즉시 관리자 검토 메시지(자료)를 삭제한다.
+        await delete_review_message(self.bot, self.request_id)
 
 
 class _ResultShim:
@@ -2685,17 +2711,20 @@ class PanelCog(commands.Cog):
     # ---------- 패널 게시 ----------
 
     async def ensure_panels(self, guild: discord.Guild) -> None:
-        """기능별 채널에 상시 패널을 게시/갱신한다."""
+        """기능별 채널에 상시 패널을 게시/갱신한다.
+
+        커뮤니티/매칭 채널은 '대화'용이므로 패널을 두지 않고,
+        커뮤니티 메뉴(역할 선택·지식 인증)는 🧭-패널 채널에 함께 게시한다.
+        """
         specs = [
             (VERIFY_CHANNEL_KEY, PANEL_MARKER_VERIFY, self._build_verify_embed, VerifyPanelView),
-            (MATCH_CHANNEL_KEY, PANEL_MARKER_MATCH, self._build_match_embed, MatchPanelView),
+            (ADMIN_CHANNEL_KEY, PANEL_MARKER_ADMIN, self._build_admin_embed, AdminPanelView),
             (
-                COMMUNITY_CHANNEL_KEY,
+                PANEL_CHANNEL_KEY,
                 PANEL_MARKER_COMMUNITY,
                 self._build_community_embed,
                 CommunityPanelView,
             ),
-            (ADMIN_CHANNEL_KEY, PANEL_MARKER_ADMIN, self._build_admin_embed, AdminPanelView),
             (PANEL_CHANNEL_KEY, PANEL_MARKER_HELP, self._build_help_embed, HelpPanelView),
         ]
         for key, marker, embed_builder, view_cls in specs:
@@ -2703,6 +2732,31 @@ class PanelCog(commands.Cog):
             if channel is None:
                 continue
             await self._post_panel(channel, marker, embed_builder(), view_cls(self.bot))
+        # 매칭 채널은 대화가 가능해야 하므로 패널을 게시하지 않는다.
+        # 이전에 커뮤니티/매칭 채널에 게시된 패널 메시지가 있으면 정리한다.
+        await self._delete_stale_panels(guild, (COMMUNITY_CHANNEL_KEY, MATCH_CHANNEL_KEY))
+
+    async def _delete_stale_panels(self, guild: discord.Guild, keys) -> None:  # noqa: ANN001
+        """지정 채널에 남아 있는 봇 패널 메시지(마커 포함)를 삭제한다."""
+        for key in keys:
+            channel = await self._managed_channel(guild, key)
+            if channel is None:
+                continue
+            try:
+                async for msg in channel.history(limit=50):
+                    if (
+                        msg.author.id == self.bot.user.id
+                        and msg.embeds
+                        and msg.embeds[0].footer
+                        and (msg.embeds[0].footer.text or "").startswith("MindFinder")
+                    ):
+                        try:
+                            await msg.delete()
+                            logger.info("이전 패널 정리: channel=%s", channel.id)
+                        except discord.HTTPException:
+                            logger.debug("이전 패널 삭제 실패: %s", msg.id)
+            except discord.HTTPException:
+                logger.debug("패널 정리 조회 실패: channel=%s", channel.id)
 
     async def _managed_channel(
         self, guild: discord.Guild, key: str
@@ -3008,6 +3062,11 @@ class PanelCog(commands.Cog):
             await message.reply(embed=embed, mention_author=True)
         except discord.HTTPException:
             logger.warning("진위확인 결과 응답 실패: channel=%s", message.channel.id)
+        # 자동검색은 PDF 를 한 번 확인하면 즉시 삭제한다 (원본 미보관).
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            logger.debug("PDF 메시지 삭제 실패: %s", message.id)
 
     async def _managed_channel_id(
         self, guild: discord.Guild, key: str
