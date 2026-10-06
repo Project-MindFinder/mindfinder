@@ -107,14 +107,50 @@ class HospitalRepository:
             result = await session.execute(select(Hospital).order_by(Hospital.name))
             return result.scalars().all()
 
-    async def create(self, name: str, normalized_name: str) -> Hospital:
-        """새 병원을 생성하고 반환한다."""
+    async def create(
+        self,
+        name: str,
+        normalized_name: str,
+        *,
+        ward: Optional[str] = None,
+        auto_verify: bool = False,
+    ) -> Hospital:
+        """새 병원을 생성하고 반환한다 (병동·자동검증 플래그 포함)."""
         async with self.db.session() as session:
-            hospital = Hospital(name=name, normalized_name=normalized_name)
+            hospital = Hospital(
+                name=name,
+                normalized_name=normalized_name,
+                ward=ward,
+                auto_verify=auto_verify,
+            )
             session.add(hospital)
             await session.commit()
             await session.refresh(hospital)
             return hospital
+
+    async def set_ward(self, hospital_id: int, ward: Optional[str]) -> None:
+        """병원의 병동을 저장한다."""
+        async with self.db.session() as session:
+            hospital = await session.get(Hospital, hospital_id)
+            if hospital is not None:
+                hospital.ward = ward
+                await session.commit()
+
+    async def set_auto_verify(self, hospital_id: int, enabled: bool) -> None:
+        """자동 진위확인 지원 여부를 저장한다."""
+        async with self.db.session() as session:
+            hospital = await session.get(Hospital, hospital_id)
+            if hospital is not None:
+                hospital.auto_verify = enabled
+                await session.commit()
+
+    async def list_auto_verify(self) -> Sequence[Hospital]:
+        """자동 진위확인을 지원하는 병원 목록."""
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(Hospital).where(Hospital.auto_verify.is_(True))
+            )
+            return result.scalars().all()
 
     async def add_alias(self, hospital_id: int, alias: str) -> None:
         async with self.db.session() as session:
@@ -152,8 +188,12 @@ class AdmissionRepository:
         discharge_year: Optional[int],
         discharge_month: Optional[int],
         is_ongoing: bool,
+        is_community: bool = True,
     ) -> int:
-        """입원 이력을 추가하고 id 를 반환한다."""
+        """입원 이력을 추가하고 id 를 반환한다.
+
+        ``is_community`` 는 병원·기간 커뮤니티 대상 여부다 (정신과 입원만 True).
+        """
         async with self.db.session() as session:
             admission = Admission(
                 user_id=user_id,
@@ -166,6 +206,7 @@ class AdmissionRepository:
                 admit_ym=ym(admit_year, admit_month),
                 discharge_ym=None if is_ongoing else ym(discharge_year, discharge_month),
                 verification="self_reported",
+                is_community=is_community,
             )
             session.add(admission)
             await session.commit()
@@ -1223,11 +1264,14 @@ class HospitalOptInRepository:
 
 
 class UserDisplayPreferenceRepository:
-    """user_display_preferences 테이블 접근 (입원 정보 노출 범위)."""
+    """user_display_preferences 테이블 접근 (노출 범위·매칭 표시명)."""
 
     # 허용 범위: none(비공개) | hospital(병원만) | period(병원+기간)
     VALID_SCOPES = ("none", "hospital", "period")
     DEFAULT_SCOPE = "hospital"
+    # 매칭 표시명 방식: masked(기본 마스킹) | real(실명) | nickname(병원 닉네임)
+    VALID_NAME_MODES = ("masked", "real", "nickname")
+    DEFAULT_NAME_MODE = "masked"
 
     def __init__(self, db: Database) -> None:
         self.db = db
@@ -1248,4 +1292,29 @@ class UserDisplayPreferenceRepository:
                 session.add(UserDisplayPreference(user_id=user_id, scope=scope))
             else:
                 row.scope = scope
+            await session.commit()
+
+    async def get_match_name(self, user_id: int) -> tuple[str, Optional[str]]:
+        """매칭 표시명 설정 (mode, nickname) 을 반환한다."""
+        async with self.db.session() as session:
+            row = await session.get(UserDisplayPreference, user_id)
+            if row is None:
+                return self.DEFAULT_NAME_MODE, None
+            return row.match_name_mode, row.hospital_nickname
+
+    async def set_match_name(
+        self, user_id: int, mode: str, nickname: Optional[str] = None
+    ) -> None:
+        """매칭 표시명 설정을 저장한다 (허용값이 아니면 무시)."""
+        if mode not in self.VALID_NAME_MODES:
+            return
+        async with self.db.session() as session:
+            row = await session.get(UserDisplayPreference, user_id)
+            if row is None:
+                row = UserDisplayPreference(user_id=user_id, match_name_mode=mode)
+                session.add(row)
+            else:
+                row.match_name_mode = mode
+            if nickname is not None:
+                row.hospital_nickname = nickname[:50] or None
             await session.commit()

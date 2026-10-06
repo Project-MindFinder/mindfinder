@@ -57,6 +57,10 @@ class Hospital(Base):
     normalized_name: Mapped[str] = mapped_column(
         String(200), unique=True, nullable=False
     )
+    # 병동(예: 7A병동, 62병동). 병원명에 하드코딩하지 않고 DB에 저장한다.
+    ward: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    # 자동 진위확인(서울대 계열) 지원 여부. 병원명 하드코딩 대신 DB 플래그로 관리.
+    auto_verify: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
     )
@@ -113,6 +117,9 @@ class Admission(Base):
     verification: Mapped[str] = mapped_column(
         String(20), default="self_reported", nullable=False
     )
+    # 병원·기간 커뮤니티 대상 여부.
+    # 정신건강의학과(폐쇄병동) 입원만 True. 응급실 단순 관찰 등은 False.
+    is_community: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
     )
@@ -135,6 +142,11 @@ class Admission(Base):
         if self.is_ongoing or self.discharge_year is None:
             return f"{start} ~ 현재 입원 중"
         return f"{start} ~ {self.discharge_year}년 {self.discharge_month}월"
+
+    @property
+    def is_community_eligible(self) -> bool:
+        """병원·기간 커뮤니티(폐쇄병동 동기 모임) 대상인지."""
+        return bool(getattr(self, "is_community", True))
 
     def overlaps(self, other: "Admission") -> bool:
         """다른 입원 이력과 기간이 겹치는지 (연·월 단위, 양끝 포함)."""
@@ -505,12 +517,24 @@ class UserDisplayPreference(Base):
         - "none"     : 아무것도 노출하지 않음 (비공개)
         - "hospital" : 병원만 노출
         - "period"   : 병원 + 기간까지 노출
+
+    match_name_mode (매칭 시 상대에게 표시될 이름 방식):
+        - "masked"    : 기본 마스킹 (예: 홍*동)
+        - "real"      : 실명(디스코드 표시명) 그대로
+        - "nickname"  : 병원에서 불린 닉네임 (직접 입력)
     """
 
     __tablename__ = "user_display_preferences"
 
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     scope: Mapped[str] = mapped_column(String(20), default="hospital", nullable=False)
+    match_name_mode: Mapped[str] = mapped_column(
+        String(20), default="masked", nullable=False
+    )
+    # 병원에서 불린 닉네임 (mode="nickname" 일 때 사용)
+    hospital_nickname: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
     )

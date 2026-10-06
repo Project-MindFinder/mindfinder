@@ -272,7 +272,7 @@ async def handle_hospital_selection(
         )
         return
 
-    if bot.verification_service.supports_auto_verify(hospital.name):
+    if await bot.verification_service.supports_auto_verify(hospital):
         await interaction.response.send_message(
             f"🏥 **{hospital.name}** 은(는) 자동 진위확인을 지원합니다.\n"
             "`/진위확인` 명령 또는 패널 채널에 **입퇴원 사실확인서 PDF** 를 올려주세요.\n"

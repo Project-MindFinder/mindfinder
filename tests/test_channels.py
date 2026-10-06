@@ -248,12 +248,19 @@ async def test_ensure_all_creates_hospital_channel_without_role(
     service: ChannelService, bot: FakeBot
 ) -> None:
     """병원 채널은 만들되, 역할은 사용자가 선택(opt-in)할 때만 만든다."""
-    hospital = await bot.hospitals.create("서울대학교병원", "서울대학교병원")
+    # 병동은 DB(ward)에 저장한다. 채널 이름은 병동을 포함해 만든다.
+    hospital = await bot.hospitals.create(
+        "서울대학교어린이병원 7A병동",
+        "서울대학교어린이병원7a병동",
+        ward="7A병동",
+    )
     guild = FakeGuild()
     await service.ensure_all(guild)  # type: ignore[arg-type]
 
-    # 채널 이름에는 병동 정보가 함께 표시된다 (예: 서울대학교병원 62병동).
-    assert any(c.name == f"🏥-{hospital.name} 62병동" for c in guild.text_channels)
+    # 채널 이름에는 병동 정보가 함께 표시된다 (예: 서울대학교어린이병원 7A병동).
+    assert any(
+        c.name == f"🏥-{hospital.name}" for c in guild.text_channels
+    )
     # 아무도 역할을 선택하지 않았으므로 병원 역할은 생성되지 않는다.
     assert not any(r.name.startswith("MF·") for r in guild.roles)
     assert not any(r.name.endswith("인증됨") and "서울대" in r.name for r in guild.roles)

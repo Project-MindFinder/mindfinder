@@ -483,6 +483,9 @@ class ChannelService:
             # 서류/지식 인증(verified)을 받은 이력만 병원·기간 커뮤니티를 연다.
             if adm.verification != "verified":
                 continue
+            # 정신과가 아닌 입원(응급실 등)은 커뮤니티 대상이 아니다.
+            if not getattr(adm, "is_community_eligible", True):
+                continue
             # 인증된 병원의 역할/포럼을 자동 확보하고 역할을 부여한다.
             try:
                 await self.ensure_hospital_channel(

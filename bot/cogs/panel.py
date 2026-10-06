@@ -134,6 +134,22 @@ class HospitalChooseView(discord.ui.View):
                 ephemeral=True,
             )
             return
+        if self.mode == "other":
+            # 기타 방법 인증은 기간을 다시 묻지 않는다 (서류 인증 시 이미 등록됨).
+            # 바로 '기타 인증 방법'만 입력받는다.
+            await interaction.response.send_modal(
+                OtherVerifyReasonModal(
+                    self.bot,
+                    self.service,
+                    hospital_id=hospital_id,
+                    start_year=None,
+                    start_month=None,
+                    end_year=None,
+                    end_month=None,
+                    is_ongoing=False,
+                )
+            )
+            return
         await interaction.response.send_message(
             f"**{hospital_display_name(hospital.name)}** 입원 기간을 선택하세요.",
             view=PeriodPickerView(self.bot, self.service, hospital_id, self.mode),
@@ -639,7 +655,7 @@ class UnifiedVerifyModal(discord.ui.Modal, title="서류 인증"):
             )
             return
 
-        if self.service.supports_auto_verify(hospital.name):
+        if await self.service.supports_auto_verify(hospital):
             await self._submit_auto(interaction, hospital, attachment)
             return
         await self._submit_manual(interaction, hospital, attachment)
@@ -764,11 +780,11 @@ class OtherVerifyReasonModal(discord.ui.Modal, title="기타 방법 인증"):
         service: VerificationService,
         *,
         hospital_id: int,
-        start_year: int,
-        start_month: int,
-        end_year: Optional[int],
-        end_month: Optional[int],
-        is_ongoing: bool,
+        start_year: Optional[int] = None,
+        start_month: Optional[int] = None,
+        end_year: Optional[int] = None,
+        end_month: Optional[int] = None,
+        is_ongoing: bool = False,
     ) -> None:
         super().__init__()
         self.bot = bot
@@ -790,18 +806,44 @@ class OtherVerifyReasonModal(discord.ui.Modal, title="기타 방법 인증"):
 
         reason = str(self.인증방법.value or "").strip()
         await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            admission_id, period, hospital_name = await self.service.register_admission(
-                user_id=interaction.user.id,
-                hospital_name=hospital.name,
-                start_year=self.start_year,
-                start_month=self.start_month,
-                end_year=self.end_year,
-                end_month=self.end_month,
-                is_ongoing=self.is_ongoing,
+
+        # 기간이 주어지지 않았으면, 이 병원에 이미 등록된(서류 인증 등) 이력을 쓴다.
+        # 서류 인증 때 기간이 이미 등록되므로 여기서 다시 묻지 않는다.
+        admission_id: Optional[int] = None
+        period = None
+        hospital_name = hospital.name
+        if self.start_year is None or self.start_month is None:
+            existing = [
+                a
+                for a in await self.bot.admissions.list_by_user(interaction.user.id)
+                if a.hospital_id == hospital.id
+            ]
+            if existing:
+                admission_id = existing[0].id
+                period = None
+        else:
+            try:
+                admission_id, period, hospital_name = (
+                    await self.service.register_admission(
+                        user_id=interaction.user.id,
+                        hospital_name=hospital.name,
+                        start_year=self.start_year,
+                        start_month=self.start_month,
+                        end_year=self.end_year,
+                        end_month=self.end_month,
+                        is_ongoing=self.is_ongoing,
+                    )
+                )
+            except PeriodError as exc:
+                await interaction.followup.send(f"⚠️ {exc}", ephemeral=True)
+                return
+
+        if admission_id is None:
+            await interaction.followup.send(
+                "⚠️ 먼저 **서류 인증** 으로 입원 이력을 등록하거나, "
+                "**입원 이력 등록**을 완료해주세요.",
+                ephemeral=True,
             )
-        except PeriodError as exc:
-            await interaction.followup.send(f"⚠️ {exc}", ephemeral=True)
             return
 
         request_id = await self.service.submit_other_proof(
@@ -823,12 +865,19 @@ class OtherVerifyReasonModal(discord.ui.Modal, title="기타 방법 인증"):
             except Exception:  # noqa: BLE001
                 logger.exception("병원 채널 확보 실패: hospital=%s", hospital.id)
 
+        # 기간은 선택 입력이므로 없으면 기존 이력의 기간을 사용한다.
+        period_text = period.text() if period is not None else "(등록된 이력 기간)"
+        if period is None:
+            adm = await self.bot.admissions.get_by_id(admission_id)
+            if adm is not None:
+                period_text = adm.period_text()
+
         await notify_admins_of_other_request(
             self.bot,
             request_id=request_id,
             user_id=interaction.user.id,
             hospital_name=hospital_name,
-            period_text=period.text(),
+            period_text=period_text,
             reason=reason,
         )
 
@@ -836,7 +885,7 @@ class OtherVerifyReasonModal(discord.ui.Modal, title="기타 방법 인증"):
             title="🟠 기타 방법 인증이 접수되었습니다",
             description=(
                 f"**병원**: {hospital_display_name(hospital_name)}\n"
-                f"**기간**: {period.text()}\n"
+                f"**기간**: {period_text}\n"
                 f"**심사번호**: `{request_id}`\n\n"
                 "**관리자가 확인 후 연락드리겠습니다.**"
             ),
@@ -1835,7 +1884,7 @@ class MatchPanelView(discord.ui.View):
         )
         for idx, cand in enumerate(matched[:MAX_ACTIONS], start=1):
             _my, other = cand.pairs[0]
-            display = self.mservice.mask_name(interaction.guild, cand.user_id)
+            display = await self.mservice.display_name(interaction.guild, cand.user_id)
             embed.add_field(
                 name=f"후보 {idx} · {display}",
                 value=f"{other.hospital.name} {other.period_text()}",
@@ -1959,6 +2008,94 @@ class DisplayScopeView(discord.ui.View):
         await interaction.response.send_message(
             f"✅ 공개 범위를 **{label}** 로 설정했습니다.",
             ephemeral=True,
+        )
+
+
+class MatchNameModal(discord.ui.Modal, title="매칭 표시명 (병원 닉네임)"):
+    """병원에서 불린 닉네임을 입력받는다."""
+
+    닉네임 = discord.ui.TextInput(
+        label="병원에서 불린 닉네임",
+        placeholder="예: 7A 별명, 병동에서 불리던 이름",
+        required=True,
+        max_length=50,
+    )
+
+    def __init__(self, bot: MindFinderBot) -> None:
+        super().__init__()
+        self.bot = bot
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        nickname = str(self.닉네임.value or "").strip()
+        if not nickname:
+            await interaction.response.send_message(
+                "⚠️ 닉네임을 입력해주세요.", ephemeral=True
+            )
+            return
+        await self.bot.display_prefs.set_match_name(
+            interaction.user.id, "nickname", nickname
+        )
+        await interaction.response.send_message(
+            f"✅ 매칭 표시명을 **병원 닉네임({nickname})** 으로 설정했습니다.",
+            ephemeral=True,
+        )
+
+
+class MatchNameView(discord.ui.View):
+    """매칭 시 상대에게 보일 **표시명 방식**을 고른다."""
+
+    _OPTIONS = [
+        (
+            "masked",
+            "기본 마스킹 (예: 홍*동)",
+            "디스코드 표시명을 가운데만 가려서 보여줍니다.",
+        ),
+        (
+            "real",
+            "실명 (디스코드 표시명 그대로)",
+            "디스코드에 설정된 이름을 그대로 보여줍니다.",
+        ),
+        (
+            "nickname",
+            "병원에서 불린 닉네임 (추천)",
+            "입원 당시 병동에서 불리던 이름을 직접 입력합니다.",
+        ),
+    ]
+
+    def __init__(self, bot: MindFinderBot, current: str) -> None:
+        super().__init__(timeout=180)
+        self.bot = bot
+        options = [
+            discord.SelectOption(
+                label=label, value=value, description=desc,
+                default=(value == current),
+            )
+            for value, label, desc in self._OPTIONS
+        ]
+        select: discord.ui.Select = discord.ui.Select(
+            placeholder="매칭 표시명 방식을 선택하세요", options=options
+        )
+        select.callback = self._on_select  # type: ignore[method-assign]
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        values = interaction.data.get("values", []) if interaction.data else []
+        if not values:
+            await interaction.response.send_message(
+                "선택이 취소되었습니다.", ephemeral=True
+            )
+            return
+        mode = values[0]
+        if mode == "nickname":
+            # 닉네임은 모달로 직접 입력받는다.
+            await interaction.response.send_modal(MatchNameModal(self.bot))
+            return
+        await self.bot.display_prefs.set_match_name(interaction.user.id, mode)
+        label = next(
+            (lbl for val, lbl, _ in self._OPTIONS if val == mode), mode
+        )
+        await interaction.response.send_message(
+            f"✅ 매칭 표시명을 **{label}** 로 설정했습니다.", ephemeral=True
         )
 
 
@@ -2185,6 +2322,28 @@ class CommunityPanelView(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(
+        label="매칭 표시명 설정", style=discord.ButtonStyle.secondary,
+        custom_id="mf:c_matchname", row=2,
+    )
+    async def match_name(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """매칭 시 상대에게 보일 **표시명 방식**을 설정한다."""
+        mode, nickname = await self.bot.display_prefs.get_match_name(
+            interaction.user.id
+        )
+        extra = f" (현재 닉네임: {nickname})" if nickname else ""
+        await interaction.response.send_message(
+            "**매칭할 때 상대에게 보일 이름**을 선택하세요.\n"
+            "· 기본 마스킹 — 디스코드 표시명 가운데만 가림\n"
+            "· 실명 — 디스코드 표시명 그대로\n"
+            "· **병원에서 불린 닉네임(추천)** — 입원 당시 불리던 이름"
+            + extra,
+            view=MatchNameView(self.bot, mode),
+            ephemeral=True,
+        )
+
 # --------------------------------------------------------------------------- #
 # 안내 패널 (영구 뷰) — 🧭-패널 채널
 # --------------------------------------------------------------------------- #
@@ -2322,21 +2481,27 @@ class HelpPanelView(discord.ui.View):
                 match_lines.append("내 채널: " + ", ".join(c.mention for c in chans))
         embed.add_field(name="매칭", value="\n".join(match_lines)[:1024], inline=False)
 
-        # 참여 중인 병원·기간 커뮤니티(스레드) 목록
+        # 참여 중인 병원·기간 커뮤니티(스레드) 목록 — 병원별로 묶어서 보여준다.
         if interaction.guild is not None and admissions:
-            thread_lines: list[str] = []
+            by_hospital: dict[str, list[str]] = {}
             for adm in admissions:
                 if adm.verification != "verified":
                     continue
+                # 정신과 입원이 아닌 이력(예: 응급실 단순 관찰)은 커뮤니티 대상이 아니다.
+                if not getattr(adm, "is_community_eligible", True):
+                    continue
+                label = hospital_display_name(adm.hospital.name)
                 names = [
                     format_ym(ym_value)
                     for ym_value in bot.channel_service.months_for_admission(adm)
                 ]
                 if names:
-                    thread_lines.append(
-                        f"· {hospital_display_name(adm.hospital.name)}: "
-                        + ", ".join(names[:6])
-                    )
+                    by_hospital.setdefault(label, []).extend(names)
+            thread_lines = []
+            for label, names in by_hospital.items():
+                # 중복 월은 제거하고 정렬한다.
+                unique = sorted(set(names))
+                thread_lines.append(f"· {label}: " + ", ".join(unique[:12]))
             if thread_lines:
                 embed.add_field(
                     name="참여 중인 병원·기간 커뮤니티",
@@ -2861,19 +3026,30 @@ class PanelCog(commands.Cog):
 
     @staticmethod
     def _items_signature(items) -> str:  # noqa: ANN001
-        """뷰 구성요소(버튼/셀렉트)를 비교 가능한 문자열로 만든다."""
+        """뷰 구성요소(버튼/셀렉트)를 비교 가능한 문자열로 만든다.
+
+        셀렉트(드롭다운)는 **options/placeholder** 까지 포함해야 항목이
+        바뀐 것을 감지해 패널을 갱신할 수 있다.
+        """
         parts: list[str] = []
         for item in items:
-            parts.append(
-                "\x1f".join(
-                    [
-                        str(getattr(item, "custom_id", "") or ""),
-                        str(getattr(item, "label", "") or ""),
-                        str(getattr(item, "style", "") or ""),
-                        str(getattr(item, "disabled", "") or ""),
-                    ]
+            chunk = [
+                str(getattr(item, "custom_id", "") or ""),
+                str(getattr(item, "label", "") or ""),
+                str(getattr(item, "style", "") or ""),
+                str(getattr(item, "disabled", "") or ""),
+                str(getattr(item, "placeholder", "") or ""),
+            ]
+            # 드롭다운(Select) 항목은 옵션 구성도 서명에 포함한다.
+            options = getattr(item, "options", None)
+            if options:
+                chunk.append(
+                    "|".join(
+                        f"{getattr(o, 'label', '')}:{getattr(o, 'value', '')}"
+                        for o in options
+                    )
                 )
-            )
+            parts.append("\x1f".join(chunk))
         return "\x1e".join(parts)
 
     @staticmethod

@@ -457,7 +457,7 @@ class VerificationCog(commands.Cog):
             )
             return
 
-        if self.service.supports_auto_verify(hospital.name):
+        if await self.service.supports_auto_verify(hospital):
             # 서울대병원: 자동 진위확인
             await interaction.response.send_message(
                 f"🏥 **{hospital.name}** 은(는) 자동 진위확인을 지원합니다.\n"

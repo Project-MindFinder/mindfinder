@@ -83,6 +83,18 @@ class Database:
                     f"ALTER TABLE {table.name} "
                     f"ADD COLUMN {column.name} {col_type}"
                 )
+                # NOT NULL 컬럼은 기존 행을 위해 기본값을 함께 지정한다.
+                if not column.nullable:
+                    default = column.default
+                    if default is not None and getattr(default, "arg", None) is not None:
+                        literal = default.arg
+                        if isinstance(literal, bool):
+                            ddl += f" DEFAULT {1 if literal else 0}"
+                        elif isinstance(literal, (int, float)):
+                            ddl += f" DEFAULT {literal}"
+                        elif isinstance(literal, str):
+                            escaped = literal.replace("'", "''")
+                            ddl += f" DEFAULT '{escaped}'"
                 try:
                     await conn.exec_driver_sql(ddl)
                     logger.info(

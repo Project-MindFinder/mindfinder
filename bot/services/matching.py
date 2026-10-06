@@ -374,7 +374,7 @@ class MatchingService:
 
     @staticmethod
     def mask_name(guild: Optional[discord.Guild], user_id: int) -> str:
-        """상대 표시명을 일부 마스킹한다."""
+        """상대 표시명을 일부 마스킹한다 (기본값)."""
         if guild:
             member = guild.get_member(user_id)
             if member:
@@ -383,3 +383,28 @@ class MatchingService:
                     return name[0] + "*"
                 return name[0] + "*" * (len(name) - 2) + name[-1]
         return "익명 동료"
+
+    async def display_name(
+        self, guild: Optional[discord.Guild], user_id: int
+    ) -> str:
+        """매칭 시 상대에게 보여줄 표시명을 **사용자 설정**에 따라 만든다.
+
+        설정(match_name_mode):
+            - masked   : 기본 마스킹 (예: 홍*동)
+            - real     : 실명(디스코드 표시명) 그대로
+            - nickname : 병원에서 불린 닉네임 (직접 입력)
+        """
+        mode, nickname = "masked", None
+        try:
+            mode, nickname = await self.bot.display_prefs.get_match_name(user_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("표시명 설정 조회 실패: user=%s", user_id)
+        if mode == "nickname" and nickname:
+            return nickname
+        if mode == "real":
+            if guild:
+                member = guild.get_member(user_id)
+                if member:
+                    return member.display_name
+            return "익명 동료"
+        return self.mask_name(guild, user_id)

@@ -145,6 +145,27 @@ class AdmissionEntry:
         dept = f" ({self.department})" if self.department else ""
         return f"{self.admit_year}년 {self.admit_month}월 ~ {end}{dept}"
 
+    @property
+    def is_psychiatric(self) -> bool:
+        """이 입원 행이 정신건강의학과(폐쇄병동) 입원인지.
+
+        진료과 정보가 없으면 판단할 수 없으므로 True(포함)로 본다.
+        """
+        if not self.department:
+            return True
+        return is_psychiatric_text(self.department)
+
+    def is_community_eligible(self, *, child_hospital: bool = False) -> bool:
+        """이 이력이 병원·기간 커뮤니티(폐쇄병동 동기 모임) 대상인지.
+
+        - 일반 병원: 정신건강의학과 입원만 대상 (응급실 등은 제외)
+        - **서울대학교어린이병원(7A병동)**: **오직 '소아정신과' 입원만** 통과.
+          소아응급실 등 다른 진료과는 제외한다.
+        """
+        if child_hospital:
+            return bool(self.department and "소아정신" in self.department)
+        return self.is_psychiatric
+
 
 @dataclass
 class ParsedCertificate:

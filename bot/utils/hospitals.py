@@ -4,6 +4,9 @@
 - 공백/특수문자 제거
 - 흔한 접미사(의료원, 병원, 정신건강의학과 등) 정리
 - 대표 병원 목록 및 별칭 매핑 제공
+
+**병동(예: 7A병동, 62병동)은 병원명 하드코딩이 아니라 DB(hospitals.name)에
+포함해 저장한다.** 여기서는 시드 시점의 대표 명칭/별칭만 정의한다.
 """
 
 from __future__ import annotations
@@ -19,12 +22,6 @@ _STRIP_TOKENS = [
 # 정규화에서 제거할 구두점/공백
 _PUNCT_RE = re.compile(r"[\s\.\,\-\_\(\)\[\]\/\\·・]+")
 
-# 병원별 병동(건물) 이름 — 서울대학교병원과 어린이병원은 서로 다른 병동이다.
-HOSPITAL_WARDS: dict[str, str] = {
-    "서울대학교병원": "62병동",
-    "서울대학교어린이병원": "7A병동",
-}
-
 
 def normalize_name(name: str) -> str:
     """병원명을 정규화한다 (비교/중복 판정용)."""
@@ -38,16 +35,19 @@ def normalize_name(name: str) -> str:
 def _build_default_hospitals() -> dict[str, list[str]]:
     """기본 시드 병원 목록과 별칭을 정의한다.
 
-    기본으로는 **서울대학교어린이병원(7A병동)** 만 등록한다.
+    병동까지 포함한 명칭을 **대표명(DB 저장값)** 으로 둔다. 이렇게 하면
+    별도의 병동 매핑 테이블 없이도 모든 표시 지점에서 병동이 함께 나온다.
     그 외 병원은 사용자가 패널의 '기타 병원 직접 입력' 으로 요청하면
-    관리자가 검토·승인한 뒤 목록에 추가된다.
+    관리자가 검토·승인한 뒤 DB 에 추가된다.
     """
     return {
-        # 대표 명칭 : [별칭들...]
-        "서울대학교어린이병원": [
+        # 대표 명칭(병동 포함) : [별칭들...]
+        "서울대학교어린이병원 7A병동": [
+            "서울대학교어린이병원",
             "서울대어린이병원",
             "서울대병원어린이병원",
-            "서울대학교어린이병원",
+            "서울대학교어린이병원 7A병동",
+            "7A병동",
         ],
     }
 
@@ -78,10 +78,9 @@ def resolve_canonical(name: str) -> str:
 
 
 def hospital_display_name(name: str) -> str:
-    """병원명에 병동명을 붙인 표시명을 만든다 (병동 정보가 없으면 병원명 그대로).
+    """병원 표시명을 만든다.
 
-    예: "서울대병원" → "서울대학교병원 62병동"
+    병동이 이미 이름에 포함되어 있으면(DB 저장값) 그대로 반환한다.
+    병동 정보가 없는 병원은 이름 그대로 반환한다.
     """
-    canonical = resolve_canonical(name)
-    ward = HOSPITAL_WARDS.get(canonical)
-    return f"{canonical} {ward}" if ward else canonical
+    return resolve_canonical(name)

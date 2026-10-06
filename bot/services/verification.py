@@ -62,13 +62,22 @@ class VerificationService:
 
     # ---------- 자동/수동 판별 ----------
 
-    def supports_auto_verify(self, hospital_name: str) -> bool:
-        """해당 병원이 자동 진위확인을 지원하는지 여부.
+    async def supports_auto_verify(self, hospital) -> bool:
+        """해당 병원이 자동 진위확인을 지원하는지 여부 (DB 플래그 기반).
 
-        서울대학교병원만 자동, 그 외 병원은 관리자 수동 심사로 처리한다.
+        병원명 하드코딩 대신 DB(hospitals.auto_verify)로 판단한다.
         """
-        canonical = hospital_utils.resolve_canonical(hospital_name)
-        return canonical in AUTO_VERIFY_HOSPITAL_NAMES
+        # 병원 객체가 오면 그대로, 문자열이면 DB에서 조회한다.
+        if isinstance(hospital, str):
+            found = await self.bot.hospitals.get_by_name(hospital)
+            if found is None:
+                found = await self.bot.hospitals.get_by_normalized(
+                    hospital_utils.normalize_name(hospital)
+                )
+            hospital = found
+        if hospital is None:
+            return False
+        return bool(getattr(hospital, "auto_verify", False))
 
     # ---------- 서류 지문 (원본 미보관, 중복 제출 탐지) ----------
 
@@ -317,14 +326,39 @@ class VerificationService:
                 cert.hospital_name or "서울대학교병원"
             )
         hospital_display = hospital_utils.hospital_display_name(hospital.name)
+        # 7A병동(어린이병원)은 **소아정신과 입원만** 인정한다 (병동 정보 기반).
+        is_child_hospital = (hospital.ward or "") == "7A병동"
+        if is_child_hospital:
+            child_psych = [
+                e for e in entries if e.is_community_eligible(child_hospital=True)
+            ]
+            if not child_psych:
+                return AutoVerifyResult(
+                    approved=False,
+                    title="소아정신과 이력 아님",
+                    color="orange",
+                    detail=(
+                        "**서울대학교어린이병원(7A병동)** 은 **소아정신과** 입원 "
+                        "이력만 인증할 수 있습니다.\n"
+                        f"확인된 진료과: {', '.join(cert.departments) or '없음'}"
+                    ),
+                    document_no=cert.document_no,
+                )
+            # 소아정신과 이력만 등록·커뮤니티 대상으로 삼는다.
+            entries = child_psych
+            period = entries[0].period()
+            start_year, start_month, end_year, end_month = period
+            period_texts = [entry.text() for entry in entries]
         await self.bot.user_repo.ensure_user(user_id)
         # 검증할 이력 id 목록. 여러 건이면 **각각 별도 이력**으로 처리한다.
         if admission_id is not None:
             admission_ids: list[int] = [admission_id]
         else:
             # 사용자가 이력을 미리 만들지 않아도 문서에서 기간을 추출해 생성한다.
+            # 정신과가 아닌 입원(예: 응급실 단순 관찰)은 커뮤니티 대상에서 제외한다.
             admission_ids = []
             for entry in entries:
+                is_community = bool(getattr(entry, "is_community_eligible", True))
                 new_id = await self.bot.admissions.add(
                     user_id=user_id,
                     hospital_id=hospital.id,
@@ -333,6 +367,7 @@ class VerificationService:
                     discharge_year=entry.discharge_year,
                     discharge_month=entry.discharge_month,
                     is_ongoing=False,
+                    is_community=is_community,
                 )
                 admission_ids.append(new_id)
             admission_id = admission_ids[0]

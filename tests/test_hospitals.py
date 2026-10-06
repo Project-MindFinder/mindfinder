@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from bot.utils.hospitals import (
-    HOSPITAL_WARDS,
     hospital_display_name,
     normalize_name,
     resolve_canonical,
@@ -21,9 +20,9 @@ def test_normalize_removes_corporate_tokens() -> None:
 
 
 def test_resolve_canonical_alias() -> None:
-    # 기본 시드에는 서울대학교어린이병원(7A병동)만 있다.
-    assert resolve_canonical("서울대어린이병원") == "서울대학교어린이병원"
-    assert resolve_canonical("서울대학교어린이병원") == "서울대학교어린이병원"
+    # 기본 시드는 '서울대학교어린이병원 7A병동'(병동 포함 대표명) 하나다.
+    assert resolve_canonical("서울대어린이병원") == "서울대학교어린이병원 7A병동"
+    assert resolve_canonical("서울대학교어린이병원") == "서울대학교어린이병원 7A병동"
     # 시드에 없는 병원은 공백만 정리해 그대로 반환한다.
     assert resolve_canonical("세브란스병원") == "세브란스병원"
     assert resolve_canonical("국립정신건강센터") == "국립정신건강센터"
@@ -38,15 +37,14 @@ def test_resolve_canonical_unknown_passthrough() -> None:
 
 def test_child_hospital_is_separate_from_main() -> None:
     # 서울대학교어린이병원(7A병동)은 서울대학교병원(62병동)과 다른 병원이다.
-    assert resolve_canonical("서울대어린이병원") == "서울대학교어린이병원"
-    assert resolve_canonical("서울대병원어린이병원") == "서울대학교어린이병원"
-    assert resolve_canonical("서울대학교어린이병원") == "서울대학교어린이병원"
+    assert resolve_canonical("서울대어린이병원") == "서울대학교어린이병원 7A병동"
+    assert resolve_canonical("서울대병원어린이병원") == "서울대학교어린이병원 7A병동"
     # 일반 서울대병원은 어린이병원으로 잘못 매핑되지 않아야 한다.
     assert resolve_canonical("서울대병원") != resolve_canonical("서울대어린이병원")
 
 
-def test_hospital_display_name_appends_ward() -> None:
-    assert HOSPITAL_WARDS["서울대학교어린이병원"] == "7A병동"
+def test_hospital_display_name_includes_ward() -> None:
+    # 대표명에 병동이 포함되어 저장되므로 표시명에도 병동이 함께 나온다.
     assert hospital_display_name("서울대어린이병원") == "서울대학교어린이병원 7A병동"
     # 병동 정보가 없는 병원은 이름 그대로 반환한다.
     assert hospital_display_name("국립정신건강센터") == "국립정신건강센터"
