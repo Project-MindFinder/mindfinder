@@ -1,0 +1,35 @@
+# ============================================
+# MindFinder CI: 테스트 자동 실행
+# - push / pull_request 시 파이썬 테스트(pytest)를 돌린다.
+# - 배포는 deploy.yml 에서 별도로 수행한다.
+# ============================================
+name: CI
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main", "develop"]
+
+jobs:
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - name: 소스 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 파이썬 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: 의존성 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "pytest>=8.0.0" "pytest-asyncio>=0.23.0"
+
+      - name: 테스트 실행
+        run: pytest -q

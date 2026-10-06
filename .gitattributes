@@ -1,0 +1,5 @@
+# 셸 스크립트는 항상 LF (서버/CI 리눅스 환경에서 실행)
+*.sh text eol=lf
+# 워크플로/도커 관련도 LF 유지
+.github/workflows/*.yml text eol=lf
+Dockerfile text eol=lf

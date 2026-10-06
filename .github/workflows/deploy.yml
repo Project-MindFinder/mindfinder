@@ -1,0 +1,57 @@
+# ============================================
+# MindFinder CD: Tailscale 로 서버에 접속해 Docker 로 배포
+# --------------------------------------------
+# 동작 순서
+#   1) GitHub 러너가 Tailscale(ephemeral 노드)로 tailnet 에 조인
+#   2) 배포 서버로 SSH 접속 (Tailscale 사설 IP/호스트명 사용)
+#   3) 서버에서 최신 코드로 갱신 후 docker compose 재기동
+#
+# 필요한 GitHub Secrets (Settings > Secrets and variables > Actions)
+#   TS_OAUTH_CLIENT_ID  : Tailscale OAuth client ID (tag:ci 권한)
+#   TS_OAUTH_SECRET     : Tailscale OAuth client secret
+#   DEPLOY_HOST         : 배포 서버의 Tailscale IP 또는 MagicDNS 이름
+#   DEPLOY_USER         : SSH 사용자 (예: deploy)
+#   DEPLOY_SSH_KEY      : SSH 개인키 (ed25519 권장)
+#   DEPLOY_PATH         : 서버에서 이 저장소가 clone 된 절대경로
+#   (선택) TS_OAUTH_TAGS : OAuth 노드에 붙일 태그 (기본 tag:ci)
+# ============================================
+name: Deploy
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch: {}
+
+# 동시 배포 방지 (진행 중이면 취소하지 않고 순서대로)
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: tailscale-ssh-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tailscale 연결
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: ${{ secrets.TS_OAUTH_TAGS || 'tag:ci' }}
+
+      - name: SSH 키 준비
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # 서버 호스트 키를 known_hosts 에 등록 (최초 1회 자동 신뢰)
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: 서버에서 배포 실행
+        run: |
+          ssh -o StrictHostKeyChecking=accept-new \
+              "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+              'bash -s' < scripts/deploy.sh
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_BRANCH: main
