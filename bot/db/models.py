@@ -192,6 +192,14 @@ class VerificationRequest(Base):
     # 파싱한 진료과 요약 (예: '소아정신과, 소아응급실')
     department_summary: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
 
+    # --- 증빙 서류 지문 (원본 PDF 미보관, 개인정보 보호) ---
+    # 개인정보를 제거한 정규화 텍스트의 SHA-256 해시 (동일 서류 판정용)
+    proof_fingerprint: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    # 유사 서류 판정용 MinHash 토큰(문자 n-gram) JSON 문자열
+    proof_shingles: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
     )
@@ -312,5 +320,136 @@ class AuditLog(Base):
     target: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+
+
+class ManagedRole(Base):
+    """봇이 자동 생성/관리하는 역할 매핑.
+
+    접근 제어에 쓰이는 역할(인증됨/서류인증/병원별)을 이름으로 자동 생성하고,
+    생성된 디스코드 역할 ID 를 길드별로 기록해 재사용한다.
+    """
+
+    __tablename__ = "managed_roles"
+    __table_args__ = (UniqueConstraint("guild_id", "key", name="uq_managed_role_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    # 논리 식별자: 'tier1' | 'tier2' | 'hospital:<hospital_id>'
+    key: Mapped[str] = mapped_column(String(120), nullable=False)
+    discord_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+
+
+class ManagedChannel(Base):
+    """봇이 자동 생성/관리하는 채널·카테고리 매핑.
+
+    kind: 'category' | 'channel'
+    key: 논리 식별자 (예: 'cat:verify', 'ch:panel', 'cat:hospital', 'ch:hospital:3')
+    """
+
+    __tablename__ = "managed_channels"
+    __table_args__ = (
+        UniqueConstraint("guild_id", "key", name="uq_managed_channel_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    key: Mapped[str] = mapped_column(String(120), nullable=False)
+    discord_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+
+
+class KnowledgeVerification(Base):
+    """지식기반 인증.
+
+    이미 서류 인증을 마친 사용자(asker)가 자신이 입원했던 시기·병원에
+    실제로 있었던 사람만 알 수 있는 질문을 올리고, 응답자(respondent)가
+    답하면 asker 가 정답 여부를 판정한다. asker 가 정답으로 확인하면
+    관리자 최종 승인을 거쳐 응답자에게 해당 병원 인증을 부여한다.
+
+    status:
+      - awaiting_answer    : 질문 등록됨, 응답 대기
+      - awaiting_verdict   : 응답 완료, asker 판정 대기
+      - asker_confirmed    : asker 가 정답으로 확인, 관리자 승인 대기
+      - asker_rejected     : asker 가 오답으로 반려
+      - approved           : 관리자 최종 승인 완료
+      - rejected           : 관리자 최종 거절
+    """
+
+    __tablename__ = "knowledge_verifications"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('awaiting_answer', 'awaiting_verdict', 'asker_confirmed', "
+            "'asker_rejected', 'approved', 'rejected')",
+            name="ck_knowledge_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # 질문자 (서류 인증자)
+    asker_id: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, index=True
+    )
+    # 응답자 (인증을 받으려는 사람)
+    respondent_id: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, index=True
+    )
+    hospital_id: Mapped[int] = mapped_column(
+        ForeignKey("hospitals.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    admit_ym: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    discharge_ym: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    period_text: Mapped[str] = mapped_column(String(120), nullable=False)
+
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(24), default="awaiting_answer", nullable=False, index=True
+    )
+    reviewer_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # 질문/응답을 주고받은 디스코드 메시지 (재시작 후에도 버튼이 동작하도록 저장)
+    channel_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+    answered_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class ConsentRecord(Base):
+    """이용자 동의 이력 (개인정보 처리방침·서비스 이용약관).
+
+    인증(입원 이력 등록/서류 제출)을 진행하려면 약관 및 개인정보 처리방침에
+    필수 동의해야 한다. 문서 종류별·버전별로 동의 시각을 기록해 두어,
+    방침이 개정되어 버전이 올라가면 다시 동의를 받을 수 있도록 한다.
+
+    doc_type: 'privacy' | 'terms'
+    """
+
+    __tablename__ = "consent_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "doc_type", "doc_version", name="uq_consent_user_doc"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    doc_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    doc_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    agreed_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
     )

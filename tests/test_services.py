@@ -17,13 +17,16 @@ from bot.db.database import Database
 from bot.db.repositories import (
     AdmissionRepository,
     AuditRepository,
+    ConsentRepository,
     HospitalRepository,
+    KnowledgeVerificationRepository,
     MatchChannelRepository,
     MatchPreferenceRepository,
     MatchRequestRepository,
     UserRepository,
     VerificationRepository,
 )
+from bot.services.access_control import AccessControlService
 from bot.services.matching import MatchingService
 from bot.services.verification import VerificationService
 from bot.utils.certificate import CertificateParseError, ParsedCertificate
@@ -48,6 +51,10 @@ class FakeBot:
         self.match_requests = MatchRequestRepository(db)
         self.match_channels = MatchChannelRepository(db)
         self.audit = AuditRepository(db)
+        # 접근 제어/지식기반 인증/약관 동의 (매칭 게이팅 및 동의 확인용)
+        self.knowledge = KnowledgeVerificationRepository(db)
+        self.consents = ConsentRepository(db)
+        self.access = AccessControlService(self)  # type: ignore[arg-type]
 
 
 class FakeMember:
@@ -119,7 +126,8 @@ async def db(tmp_path):
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(token="test-token")
+    # 매칭 게이팅(서류 인증자 한정) 테스트가 기존 흐름을 유지하도록 기본 허용한다.
+    return Settings(token="test-token", allow_unverified_matching=True)
 
 
 @pytest.fixture
@@ -370,11 +378,15 @@ async def test_submit_and_reject_flow(
 # MatchingService
 # --------------------------------------------------------------------------- #
 async def _seed_pair(bot: FakeBot, mservice: MatchingService) -> None:
-    """같은 병원·겹치는 기간의 두 사용자를 등록한다."""
+    """같은 병원·겹치는 기간의 두 사용자를 등록한다.
+
+    매칭은 서류 인증(verified) 이력끼리만 허용되므로, 시드 이력을
+    등록 직후 verified 로 표시한다.
+    """
     for user_id in (1, 2):
         await mservice.set_matching(user_id, enabled=True)
     service = VerificationService(bot)  # type: ignore[arg-type]
-    await service.register_admission(
+    adm1, _period1, _name1 = await service.register_admission(
         user_id=1,
         hospital_name="서울대학교병원",
         start_year=2020,
@@ -383,7 +395,7 @@ async def _seed_pair(bot: FakeBot, mservice: MatchingService) -> None:
         end_month=6,
         is_ongoing=False,
     )
-    await service.register_admission(
+    adm2, _period2, _name2 = await service.register_admission(
         user_id=2,
         hospital_name="서울대학교병원",
         start_year=2020,
@@ -392,6 +404,8 @@ async def _seed_pair(bot: FakeBot, mservice: MatchingService) -> None:
         end_month=8,
         is_ongoing=False,
     )
+    await bot.admissions.set_verification(adm1, "verified")
+    await bot.admissions.set_verification(adm2, "verified")
 
 
 async def test_set_matching_toggles(bot: FakeBot, mservice: MatchingService) -> None:

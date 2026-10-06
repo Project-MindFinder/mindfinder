@@ -21,6 +21,7 @@ from discord.ext import commands
 from bot.core import MindFinderBot
 from bot.services.matching import Candidate, MatchingService
 from bot.services.verification import VERIFICATION_LABEL, VerificationService
+from bot.ui.consent import build_consent_embed, ensure_consent
 from bot.utils.periods import PeriodError
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,15 @@ class AdmissionModal(discord.ui.Modal, title="입원 이력 등록"):
         self.service = service
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        async def _proceed(inner: discord.Interaction) -> None:
+            await self._register(inner)
+
+        # 인증 전 약관/개인정보 필수 동의
+        if not await ensure_consent(self.bot, interaction, _proceed):
+            return
+        await _proceed(interaction)
+
+    async def _register(self, interaction: discord.Interaction) -> None:
         try:
             start_year = int(str(self.입원연도.value).strip())
             start_month = int(str(self.입원월.value).strip())
@@ -270,9 +280,15 @@ class MainPanelView(discord.ui.View):
     async def admission(
         self, interaction: discord.Interaction, _button: discord.ui.Button
     ) -> None:
-        await interaction.response.send_modal(
-            AdmissionModal(self.bot, self.vservice)
-        )
+        async def _proceed(inner: discord.Interaction) -> None:
+            await inner.response.send_modal(
+                AdmissionModal(self.bot, self.vservice)
+            )
+
+        # 인증 전 약관/개인정보 필수 동의
+        if not await ensure_consent(self.bot, interaction, _proceed):
+            return
+        await _proceed(interaction)
 
     @discord.ui.button(
         label="서울대병원 서류 인증", style=discord.ButtonStyle.success,
@@ -444,6 +460,17 @@ class MainPanelView(discord.ui.View):
         for ch in chans:
             embed.add_field(name=ch.name, value=ch.mention, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(
+        label="약관·개인정보", style=discord.ButtonStyle.secondary,
+        custom_id="mf:consent_info", row=3,
+    )
+    async def consent_info(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        await interaction.response.send_message(
+            embed=build_consent_embed(self.bot), ephemeral=True
+        )
 
     @discord.ui.button(
         label="도움 안내", style=discord.ButtonStyle.secondary,

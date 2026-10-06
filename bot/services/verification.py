@@ -14,6 +14,7 @@ if TYPE_CHECKING:  # 순환 임포트 방지를 위해 타입 검사 시에만 �
     from bot.core import MindFinderBot
 
 from bot.utils import certificate as certificate_utils
+from bot.utils import document_fingerprint as fingerprint_utils
 from bot.utils import hospitals as hospital_utils
 from bot.utils.periods import Period, validate_period
 from bot.utils.snuh_truth import SnuhTruthClient, TruthStatus
@@ -24,6 +25,8 @@ logger = logging.getLogger(__name__)
 MAX_PDF_BYTES = 10 * 1024 * 1024
 # 진위확인 자동 검증을 지원하는 병원 키
 TRUTH_SUPPORTED_HOSPITALS = {"snuh"}
+# 자동 진위확인을 지원하는 대표 병원명 (그 외 병원은 관리자 수동 심사)
+AUTO_VERIFY_HOSPITAL_NAMES = {"서울대학교병원"}
 
 # 인증 상태 표시
 VERIFICATION_LABEL = {
@@ -53,6 +56,45 @@ class VerificationService:
 
     def __init__(self, bot: MindFinderBot) -> None:
         self.bot = bot
+
+    # ---------- 자동/수동 판별 ----------
+
+    def supports_auto_verify(self, hospital_name: str) -> bool:
+        """해당 병원이 자동 진위확인을 지원하는지 여부.
+
+        서울대학교병원만 자동, 그 외 병원은 관리자 수동 심사로 처리한다.
+        """
+        canonical = hospital_utils.resolve_canonical(hospital_name)
+        return canonical in AUTO_VERIFY_HOSPITAL_NAMES
+
+    # ---------- 서류 지문 (원본 미보관, 중복 제출 탐지) ----------
+
+    async def check_duplicate_fingerprint(
+        self, raw_text: str
+    ) -> Optional[str]:
+        """서류 텍스트의 지문을 기존 제출 서류와 대조한다.
+
+        원본 PDF 를 저장하지 않고, 개인정보를 제거한 정규화 텍스트의 해시와
+        MinHash 토큰만 비교한다.
+
+        Returns:
+            중복으로 판정되면 사유 문자열, 아니면 None.
+        """
+        if not raw_text:
+            return None
+        fingerprint = fingerprint_utils.fingerprint_text(raw_text)
+        if not fingerprint.fingerprint:
+            return None
+        for stored_hash, stored_shingles in await self.bot.verifications.list_fingerprints():
+            if fingerprint_utils.is_similar(
+                fingerprint, stored_hash, stored_shingles
+            ):
+                if stored_hash == fingerprint.fingerprint:
+                    return "동일한 서류가 이미 제출되어 있습니다."
+                return (
+                    "이미 제출된 서류와 매우 유사합니다 (표현만 다른 같은 서류일 수 있습니다)."
+                )
+        return None
 
     # ---------- 병원 정규화 ----------
 
@@ -192,7 +234,7 @@ class VerificationService:
                 detail="서류에서 문서확인번호(문서번호)를 찾지 못했습니다.",
             )
 
-        # 6) 중복 문서 방지
+        # 6) 중복 문서 방지 (문서확인번호)
         existing = await self.bot.verifications.find_by_document_no(cert.document_no)
         if existing is not None:
             return AutoVerifyResult(
@@ -200,6 +242,17 @@ class VerificationService:
                 title="중복 문서",
                 color="orange",
                 detail="이미 등록된 문서입니다. 동일한 서류로는 중복 인증할 수 없습니다.",
+                document_no=cert.document_no,
+            )
+
+        # 6-1) 중복 서류 방지 (지문/유사도). 원본은 저장하지 않고 지문만 대조한다.
+        duplicate_reason = await self.check_duplicate_fingerprint(cert.raw_text)
+        if duplicate_reason is not None:
+            return AutoVerifyResult(
+                approved=False,
+                title="중복 서류",
+                color="orange",
+                detail=duplicate_reason,
                 document_no=cert.document_no,
             )
 
@@ -252,7 +305,8 @@ class VerificationService:
         approved = result.status is TruthStatus.VALID
         department_summary = ", ".join(cert.departments) or None
 
-        # 9) 검증 요청 기록 + 이력 상태 반영
+        # 9) 검증 요청 기록 + 이력 상태 반영 (원본 대신 지문만 저장)
+        fingerprint = fingerprint_utils.fingerprint_text(cert.raw_text)
         request_id = await self.bot.verifications.create_auto_verified(
             user_id=user_id,
             admission_id=admission_id,
@@ -267,6 +321,8 @@ class VerificationService:
                 if approved
                 else f"진위확인 실패: {result.message}"
             ),
+            proof_fingerprint=fingerprint.fingerprint,
+            proof_shingles=fingerprint_utils.encode_shingles(fingerprint.shingles),
         )
         await self.bot.admissions.set_verification(
             admission_id, "verified" if approved else "rejected"

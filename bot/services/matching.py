@@ -48,6 +48,12 @@ class MatchingService:
     # ---------- 매칭 희망 설정 ----------
 
     async def set_matching(self, user_id: int, enabled: bool) -> None:
+        # 매칭은 서류 인증(2단계) 사용자에게만 허용한다 (설정으로 완화 가능).
+        if enabled and not await self.bot.access.can_match(user_id):
+            raise ValueError(
+                "매칭은 서류 인증을 마친 사용자만 이용할 수 있습니다. "
+                "먼저 서류 인증을 진행해주세요."
+            )
         await self.bot.user_repo.ensure_user(user_id)
         await self.bot.match_prefs.set_enabled(user_id, enabled)
         await self.bot.audit.log(
@@ -73,8 +79,18 @@ class MatchingService:
         if not my_admissions:
             raise ValueError("먼저 입원 이력을 등록해주세요.")
 
+        # 매칭은 서류 인증(2단계) 사용자에게만 허용한다 (설정으로 완화 가능).
+        if not await self.bot.access.can_match(user_id):
+            raise ValueError(
+                "매칭은 서류 인증을 마친 사용자만 이용할 수 있습니다. "
+                "먼저 서류 인증을 진행해주세요."
+            )
+
         candidates: dict[int, list] = {}
         for my_adm in my_admissions:
+            # 서류 인증(verified)을 마친 이력끼리만 매칭한다.
+            if my_adm.verification != "verified":
+                continue
             others = await self.bot.admissions.find_overlapping(
                 hospital_id=my_adm.hospital_id,
                 admit_ym_val=my_adm.admit_ym,
@@ -82,6 +98,8 @@ class MatchingService:
                 exclude_user_id=user_id,
             )
             for other in others:
+                if other.verification != "verified":
+                    continue
                 candidates.setdefault(other.user_id, []).append((my_adm, other))
 
         matched: list[Candidate] = []

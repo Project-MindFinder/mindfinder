@@ -8,6 +8,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from bot.core import MindFinderBot
+from bot.ui.consent import ConsentView, build_consent_embed
 from bot.utils.hospitals import get_default_hospitals
 
 logger = logging.getLogger(__name__)
@@ -16,7 +18,7 @@ logger = logging.getLogger(__name__)
 class GeneralCog(commands.Cog):
     """기본 정보성 명령을 제공한다."""
 
-    def __init__(self, bot: commands.Bot) -> None:
+    def __init__(self, bot: MindFinderBot) -> None:
         self.bot = bot
 
     @app_commands.command(name="도움말", description="MindFinder 사용법을 안내합니다.")
@@ -76,6 +78,14 @@ class GeneralCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
+            name="5. 약관·개인정보",
+            value=(
+                "`/약관` — 개인정보 처리방침과 서비스 이용약관을 확인합니다\n"
+                "인증(이력 등록/서류 제출) 시 두 문서에 **필수 동의**가 필요합니다."
+            ),
+            inline=False,
+        )
+        embed.add_field(
             name="개인정보 보호",
             value=(
                 "매칭이 성사되면 봇이 **비공개 채널**을 만들어 당사자들만 초대합니다.\n"
@@ -85,6 +95,21 @@ class GeneralCog(commands.Cog):
         )
         embed.set_footer(text="위기 상황 시 `/도움` 명령으로 상담 안내를 확인하세요.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(
+        name="약관", description="개인정보 처리방침과 서비스 이용약관을 확인합니다."
+    )
+    async def terms_command(self, interaction: discord.Interaction) -> None:
+        embed = build_consent_embed(self.bot)
+        missing = await self.bot.consent_service.missing_docs(interaction.user.id)
+        if missing:
+            view = ConsentView(self.bot, interaction.user.id)
+            await interaction.response.send_message(
+                embed=embed, view=view, ephemeral=True
+            )
+        else:
+            embed.set_footer(text="✅ 필수 문서에 모두 동의하셨습니다.")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="병원목록", description="등록된 대표 병원 목록을 봅니다.")
     async def hospital_list(self, interaction: discord.Interaction) -> None:
@@ -102,5 +127,5 @@ class GeneralCog(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-async def setup(bot: commands.Bot) -> None:
+async def setup(bot: MindFinderBot) -> None:
     await bot.add_cog(GeneralCog(bot))

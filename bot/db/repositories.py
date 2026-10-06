@@ -16,8 +16,12 @@ from bot.db.database import Database
 from bot.db.models import (
     Admission,
     AuditLog,
+    ConsentRecord,
     Hospital,
     HospitalAlias,
+    KnowledgeVerification,
+    ManagedChannel,
+    ManagedRole,
     MatchChannel,
     MatchChannelMember,
     MatchPreference,
@@ -281,10 +285,13 @@ class VerificationRepository:
         department_summary: Optional[str],
         approved: bool,
         note: Optional[str] = None,
+        proof_fingerprint: Optional[str] = None,
+        proof_shingles: Optional[str] = None,
     ) -> int:
         """진위확인 결과를 담은 검증 요청을 생성한다.
 
         관리자 수동 심사 없이 자동 판정 결과를 그대로 저장한다.
+        서류 원본 대신 지문(fingerprint)과 유사도 데이터(shingles)만 보관한다.
         """
         async with self.db.session() as session:
             request = VerificationRequest(
@@ -298,12 +305,47 @@ class VerificationRepository:
                 truth_message=truth_message,
                 department_summary=department_summary,
                 note=note,
+                proof_fingerprint=proof_fingerprint,
+                proof_shingles=proof_shingles,
                 reviewed_at=_utcnow(),
             )
             session.add(request)
             await session.commit()
             await session.refresh(request)
             return request.id
+
+    async def set_fingerprint(
+        self,
+        request_id: int,
+        proof_fingerprint: str,
+        proof_shingles: str,
+    ) -> None:
+        """검증 요청에 서류 지문(원본 미보관)을 기록한다."""
+        async with self.db.session() as session:
+            await session.execute(
+                update(VerificationRequest)
+                .where(VerificationRequest.id == request_id)
+                .values(
+                    proof_fingerprint=proof_fingerprint,
+                    proof_shingles=proof_shingles,
+                )
+            )
+            await session.commit()
+
+    async def list_fingerprints(self) -> Sequence[tuple[str, str]]:
+        """저장된 (지문, shingles) 목록을 반환한다 (유사 서류 대조용)."""
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(
+                    VerificationRequest.proof_fingerprint,
+                    VerificationRequest.proof_shingles,
+                ).where(VerificationRequest.proof_fingerprint.is_not(None))
+            )
+            return [
+                (row[0], row[1] or "")
+                for row in result.all()
+                if row[0]
+            ]
 
     async def set_proof_message(
         self, request_id: int, channel_id: int, message_id: int
@@ -594,3 +636,276 @@ class AuditRepository:
                 AuditLog(action=action, actor_id=actor_id, target=target, detail=detail)
             )
             await session.commit()
+
+
+class ManagedRoleRepository:
+    """managed_roles 테이블 접근 (봇이 관리하는 역할 매핑)."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def get(self, guild_id: int, key: str) -> Optional[ManagedRole]:
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(ManagedRole).where(
+                    ManagedRole.guild_id == guild_id, ManagedRole.key == key
+                )
+            )
+            return result.scalar_one_or_none()
+
+    async def upsert(
+        self, guild_id: int, key: str, discord_id: int, name: str
+    ) -> None:
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(ManagedRole).where(
+                    ManagedRole.guild_id == guild_id, ManagedRole.key == key
+                )
+            )
+            role = result.scalar_one_or_none()
+            if role is None:
+                session.add(
+                    ManagedRole(
+                        guild_id=guild_id,
+                        key=key,
+                        discord_id=discord_id,
+                        name=name,
+                    )
+                )
+            else:
+                role.discord_id = discord_id
+                role.name = name
+            await session.commit()
+
+
+class ManagedChannelRepository:
+    """managed_channels 테이블 접근 (봇이 관리하는 채널/카테고리 매핑)."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def get(self, guild_id: int, key: str) -> Optional[ManagedChannel]:
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(ManagedChannel).where(
+                    ManagedChannel.guild_id == guild_id, ManagedChannel.key == key
+                )
+            )
+            return result.scalar_one_or_none()
+
+    async def upsert(
+        self,
+        guild_id: int,
+        kind: str,
+        key: str,
+        discord_id: int,
+        name: str,
+    ) -> None:
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(ManagedChannel).where(
+                    ManagedChannel.guild_id == guild_id, ManagedChannel.key == key
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                session.add(
+                    ManagedChannel(
+                        guild_id=guild_id,
+                        kind=kind,
+                        key=key,
+                        discord_id=discord_id,
+                        name=name,
+                    )
+                )
+            else:
+                row.kind = kind
+                row.discord_id = discord_id
+                row.name = name
+            await session.commit()
+
+
+class KnowledgeVerificationRepository:
+    """knowledge_verifications 테이블 접근 (지식기반 인증)."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def create(
+        self,
+        *,
+        asker_id: int,
+        respondent_id: int,
+        hospital_id: int,
+        admit_ym: int,
+        discharge_ym: Optional[int],
+        period_text: str,
+        question: str,
+    ) -> int:
+        async with self.db.session() as session:
+            row = KnowledgeVerification(
+                asker_id=asker_id,
+                respondent_id=respondent_id,
+                hospital_id=hospital_id,
+                admit_ym=admit_ym,
+                discharge_ym=discharge_ym,
+                period_text=period_text,
+                question=question,
+            )
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return row.id
+
+    async def get_by_id(self, request_id: int) -> Optional[KnowledgeVerification]:
+        async with self.db.session() as session:
+            return await session.get(KnowledgeVerification, request_id)
+
+    async def set_message(
+        self, request_id: int, channel_id: int, message_id: int
+    ) -> None:
+        async with self.db.session() as session:
+            await session.execute(
+                update(KnowledgeVerification)
+                .where(KnowledgeVerification.id == request_id)
+                .values(channel_id=channel_id, message_id=message_id)
+            )
+            await session.commit()
+
+    async def set_answer(self, request_id: int, answer: str) -> None:
+        async with self.db.session() as session:
+            await session.execute(
+                update(KnowledgeVerification)
+                .where(KnowledgeVerification.id == request_id)
+                .values(
+                    answer=answer,
+                    status="awaiting_verdict",
+                    answered_at=_utcnow(),
+                )
+            )
+            await session.commit()
+
+    async def set_status(
+        self,
+        request_id: int,
+        status: str,
+        *,
+        reviewer_id: Optional[int] = None,
+        note: Optional[str] = None,
+    ) -> None:
+        async with self.db.session() as session:
+            values: dict = {"status": status, "resolved_at": _utcnow()}
+            if reviewer_id is not None:
+                values["reviewer_id"] = reviewer_id
+            if note is not None:
+                values["note"] = note
+            await session.execute(
+                update(KnowledgeVerification)
+                .where(KnowledgeVerification.id == request_id)
+                .values(**values)
+            )
+            await session.commit()
+
+    async def list_for_respondent(
+        self, respondent_id: int, status: str = "awaiting_answer"
+    ) -> Sequence[KnowledgeVerification]:
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(KnowledgeVerification)
+                .where(
+                    KnowledgeVerification.respondent_id == respondent_id,
+                    KnowledgeVerification.status == status,
+                )
+                .order_by(KnowledgeVerification.created_at.desc())
+            )
+            return result.scalars().all()
+
+    async def list_by_status(
+        self, status: str
+    ) -> Sequence[KnowledgeVerification]:
+        """상태별 지식기반 인증 요청 목록 (재시작 후 영구 뷰 재등록용)."""
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(KnowledgeVerification)
+                .where(KnowledgeVerification.status == status)
+                .order_by(KnowledgeVerification.created_at)
+            )
+            return result.scalars().all()
+
+    async def list_for_asker(
+        self, asker_id: int, status: Optional[str] = None
+    ) -> Sequence[KnowledgeVerification]:
+        async with self.db.session() as session:
+            stmt = select(KnowledgeVerification).where(
+                KnowledgeVerification.asker_id == asker_id
+            )
+            if status is not None:
+                stmt = stmt.where(KnowledgeVerification.status == status)
+            result = await session.execute(
+                stmt.order_by(KnowledgeVerification.created_at.desc())
+            )
+            return result.scalars().all()
+
+    async def list_pending_review(self) -> Sequence[KnowledgeVerification]:
+        """관리자 최종 승인 대기 목록 (asker 가 정답 확인한 건)."""
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(KnowledgeVerification)
+                .where(KnowledgeVerification.status == "asker_confirmed")
+                .order_by(KnowledgeVerification.resolved_at)
+            )
+            return result.scalars().all()
+
+
+class ConsentRepository:
+    """consent_records 테이블 접근 (개인정보 처리방침·서비스 이용약관 동의)."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def record(
+        self, user_id: int, doc_type: str, doc_version: str
+    ) -> None:
+        """동의를 기록한다 (같은 문서·버전이 이미 있으면 무시)."""
+        async with self.db.session() as session:
+            existing = await session.execute(
+                select(ConsentRecord).where(
+                    ConsentRecord.user_id == user_id,
+                    ConsentRecord.doc_type == doc_type,
+                    ConsentRecord.doc_version == doc_version,
+                )
+            )
+            if existing.scalars().first() is not None:
+                return
+            session.add(
+                ConsentRecord(
+                    user_id=user_id,
+                    doc_type=doc_type,
+                    doc_version=doc_version,
+                )
+            )
+            await session.commit()
+
+    async def has_consent(
+        self, user_id: int, doc_type: str, doc_version: str
+    ) -> bool:
+        """특정 문서·버전에 동의한 적이 있는지 확인한다."""
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(ConsentRecord.id).where(
+                    ConsentRecord.user_id == user_id,
+                    ConsentRecord.doc_type == doc_type,
+                    ConsentRecord.doc_version == doc_version,
+                )
+            )
+            return result.first() is not None
+
+    async def list_for_user(self, user_id: int) -> Sequence[ConsentRecord]:
+        """사용자의 동의 이력을 최신순으로 반환한다."""
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(ConsentRecord)
+                .where(ConsentRecord.user_id == user_id)
+                .order_by(ConsentRecord.agreed_at.desc())
+            )
+            return result.scalars().all()

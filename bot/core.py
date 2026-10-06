@@ -19,13 +19,21 @@ from bot.db.seed import seed_all
 from bot.db.repositories import (
     AdmissionRepository,
     AuditRepository,
+    ConsentRepository,
     HospitalRepository,
+    KnowledgeVerificationRepository,
+    ManagedChannelRepository,
+    ManagedRoleRepository,
     MatchChannelRepository,
     MatchPreferenceRepository,
     MatchRequestRepository,
     UserRepository,
     VerificationRepository,
 )
+from bot.services.access_control import AccessControlService
+from bot.services.channels import ChannelService
+from bot.services.consent import ConsentService
+from bot.services.knowledge import KnowledgeService
 from bot.services.matching import MatchingService
 from bot.services.verification import VerificationService
 
@@ -66,10 +74,20 @@ class MindFinderBot(commands.Bot):
         self.match_requests = MatchRequestRepository(self.db)
         self.match_channels = MatchChannelRepository(self.db)
         self.audit = AuditRepository(self.db)
+        # 접근 제어(역할/채널) 및 지식기반 인증
+        self.managed_roles = ManagedRoleRepository(self.db)
+        self.managed_channels = ManagedChannelRepository(self.db)
+        self.knowledge = KnowledgeVerificationRepository(self.db)
+        # 약관/개인정보 동의
+        self.consents = ConsentRepository(self.db)
 
         # 도메인 서비스 (UI 비의존). 슬래시 커맨드와 상시 패널이 공유한다.
         self.verification_service = VerificationService(self)
         self.matching_service = MatchingService(self)
+        self.access = AccessControlService(self)
+        self.knowledge_service = KnowledgeService(self)
+        self.channel_service = ChannelService(self)
+        self.consent_service = ConsentService(self)
 
     async def setup_hook(self) -> None:
         """봇 로그인 직후 실행. DB 연결, 시드, 코그 로드."""
@@ -87,6 +105,7 @@ class MindFinderBot(commands.Bot):
             "bot.cogs.community",
             "bot.cogs.crisis",
             "bot.cogs.panel",
+            "bot.cogs.knowledge",
         ):
             try:
                 await self.load_extension(extension)
