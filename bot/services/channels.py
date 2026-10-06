@@ -230,6 +230,71 @@ class ChannelService:
     def hospital_channel_name(hospital_name: str) -> str:
         return _clip(f"🏥-{hospital_name}")
 
+    async def _ensure_forum(
+        self,
+        guild: discord.Guild,
+        key: str,
+        name: str,
+        category: Optional[discord.CategoryChannel],
+        overwrites: dict,
+    ) -> Optional[discord.ForumChannel]:
+        """포럼 채널을 확보한다 (기간별 커뮤니티를 '게시글(스레드)'로 운영)."""
+        record = await self.bot.managed_channels.get(guild.id, key)
+        channel: Optional[discord.ForumChannel] = None
+        if record is not None:
+            found = guild.get_channel(record.discord_id)
+            if isinstance(found, discord.ForumChannel):
+                channel = found
+            elif found is not None:
+                ctype = getattr(found, "type", None)
+                if ctype is not None and ctype != discord.ChannelType.forum:
+                    # 이전에 만든 '텍스트 채널' → 포럼으로 교체한다.
+                    try:
+                        await found.delete(  # type: ignore[attr-defined]
+                            reason="MindFinder 병원 커뮤니티를 포럼으로 전환"
+                        )
+                        logger.info("기존 병원 채널 삭제(포럼 전환): %s", record.discord_id)
+                    except (discord.Forbidden, discord.HTTPException):
+                        logger.debug(
+                            "기존 병원 채널 삭제 실패: %s", record.discord_id
+                        )
+                else:
+                    # 타입 정보가 없는 대역(테스트) 등은 재사용한다.
+                    channel = found  # type: ignore[assignment]
+        if channel is None and category is not None:
+            for ch in getattr(category, "channels", []):
+                if getattr(ch, "name", None) == name and isinstance(
+                    ch, discord.ForumChannel
+                ):
+                    channel = ch
+                    break
+        if channel is not None:
+            await self.bot.managed_channels.upsert(
+                guild.id, "channel", key, channel.id, channel.name
+            )
+            try:
+                await channel.edit(overwrites=overwrites)
+            except (discord.Forbidden, discord.HTTPException):
+                logger.debug("포럼 권한 동기화 실패: channel=%s", channel.id)
+            return channel
+        if not self.bot.settings.auto_create_channels:
+            return None
+        try:
+            channel = await guild.create_forum_channel(
+                name=name,
+                category=category,
+                overwrites=overwrites,
+                reason="MindFinder 채널 자동 구성",
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            logger.exception("포럼 생성 실패: guild=%s key=%s", guild.id, key)
+            return None
+        await self.bot.managed_channels.upsert(
+            guild.id, "channel", key, channel.id, channel.name
+        )
+        logger.info("포럼 생성: guild=%s key=%s", guild.id, key)
+        return channel
+
     async def ensure_hospital_channel(
         self,
         guild: discord.Guild,
@@ -237,10 +302,10 @@ class ChannelService:
         hospital_name: str,
         *,
         with_role: bool = True,
-    ) -> Optional[discord.TextChannel]:
-        """병원 전용 채널을 확보한다.
+    ) -> Optional[discord.ForumChannel]:
+        """병원 전용 **포럼**을 확보한다 (기간별 커뮤니티는 게시글/스레드).
 
-        ``with_role=False`` 이면 **역할을 만들지 않고** 채널만 만든다.
+        ``with_role=False`` 이면 **역할을 만들지 않고** 포럼만 만든다.
         (병원 역할은 사용자가 커뮤니티 패널에서 직접 선택했을 때만 생성)
         """
         category = await self._ensure_category(
@@ -263,9 +328,12 @@ class ChannelService:
             overwrites[tier2_role] = discord.PermissionOverwrite(view_channel=False)
         if hospital_role is not None:
             overwrites[hospital_role] = discord.PermissionOverwrite(
-                view_channel=True, send_messages=True, read_message_history=True
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                create_public_threads=True,
             )
-        return await self._ensure_text(
+        return await self._ensure_forum(
             guild,
             self.hospital_channel_key(hospital_id),
             self.hospital_channel_name(hospital_name),
@@ -279,8 +347,8 @@ class ChannelService:
         user_id: int,
         hospital_id: int,
         hospital_name: str,
-    ) -> Optional[discord.TextChannel]:
-        """사용자가 특정 병원 역할을 '선택'했을 때 채널/역할을 확보하고 부여한다."""
+    ) -> Optional[discord.ForumChannel]:
+        """사용자가 특정 병원 역할을 '선택'했을 때 포럼/역할을 확보하고 부여한다."""
         channel = await self.ensure_hospital_channel(
             guild, hospital_id, hospital_name, with_role=True
         )
@@ -302,10 +370,10 @@ class ChannelService:
         *,
         private: bool = True,
     ) -> Optional[discord.Thread]:
-        """병원 채널 안에 기간 단위 스레드를 만든다.
+        """병원 **포럼** 안에 기간 단위 게시글(스레드)을 만든다.
 
-        ``private=True`` (기본) 이면 **비공개 스레드**로 만들어, 초대된
-        (해당 기간에 입원했던) 인원만 볼 수 있다. 이미 있으면 재사용한다.
+        각 기간 게시글은 **비공개 스레드**로 만들어, 추가된(해당 기간에
+        입원했던) 인원만 볼 수 있다. 이미 있으면 재사용한다.
         """
         channel = await self.ensure_hospital_channel(
             guild, hospital_id, hospital_name
@@ -314,7 +382,7 @@ class ChannelService:
             return None
         thread_name = _clip(period_text)
         # 활성 스레드에서 먼저 찾는다.
-        for thread in channel.threads:
+        for thread in getattr(channel, "threads", []):
             if thread.name == thread_name:
                 return thread
         # 보관(archived)된 비공개 스레드도 재사용한다 (중복 생성 방지).
@@ -328,25 +396,30 @@ class ChannelService:
                 logger.debug(
                     "보관 스레드 조회 실패: channel=%s", getattr(channel, "id", None)
                 )
-        thread_type = (
-            discord.ChannelType.private_thread
-            if private
-            else discord.ChannelType.public_thread
-        )
         try:
-            thread = await channel.create_thread(
+            result = await channel.create_thread(
                 name=thread_name,
-                type=thread_type,
+                content=(
+                    f"**{hospital_name} · {period_text}**\n"
+                    "같은 시기에 입원했던 분들과 이야기를 나눠보세요."
+                ),
                 reason="MindFinder 기간 커뮤니티",
             )
-            await thread.send(
-                f"**{hospital_name} · {period_text}**\n"
-                "같은 시기에 입원했던 분들과 이야기를 나눠보세요."
-            )
-            return thread
         except (discord.Forbidden, discord.HTTPException):
-            logger.exception("기간 스레드 생성 실패: hospital=%s", hospital_id)
+            logger.exception("기간 게시글 생성 실패: hospital=%s", hospital_id)
             return None
+        # create_thread 는 (thread, message) 튜플을 반환할 수 있다.
+        thread = result[0] if isinstance(result, tuple) else result
+        # 비공개 스레드로 전환해 해당 기간 인원만 보이게 한다.
+        if private and thread is not None:
+            try:
+                await thread.edit(type=discord.ChannelType.private_thread)
+            except (discord.Forbidden, discord.HTTPException):
+                logger.debug(
+                    "기간 스레드 비공개 전환 실패: thread=%s",
+                    getattr(thread, "id", None),
+                )
+        return thread
 
     # ---------- 커뮤니티 접근 동기화 ----------
 

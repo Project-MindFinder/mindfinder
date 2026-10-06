@@ -145,13 +145,13 @@ class AdmissionModal(discord.ui.Modal, title="입원 이력 등록"):
 # 모달: 통합 서류 인증 (병원 선택 + 기간 입력 + PDF 업로드)
 # --------------------------------------------------------------------------- #
 class UnifiedVerifyModal(discord.ui.Modal, title="서류 인증"):
-    """병원을 고르고(창 안 드롭다운) 기간을 입력해 인증을 진행한다.
+    """선택한 병원의 입원 기간을 입력받아 인증을 진행한다.
 
-    · 서울대학교병원(62병동)·서울대학교어린이병원(7A병동)
-      → 창에서 병원을 고르면 **인증 채널에 PDF 업로드** 안내 (자동 진위확인)
+    · 서울대병원 계열 → 인증 채널에 PDF 업로드 안내 (자동 진위확인)
     · 그 외 병원 → 기간을 입력해 관리자 수동 심사 요청
 
-    디스코드 모달에는 파일 업로드(FileUpload)를 넣을 수 없으므로,
+    디스코드 모달에는 Select/FileUpload 를 넣을 수 없으므로,
+    병원은 앞 단계의 드롭다운(HospitalPickView)에서 고르고,
     PDF 는 **인증 채널에 업로드**하면 on_message 리스너가 자동 진위확인한다.
     """
 
@@ -162,42 +162,22 @@ class UnifiedVerifyModal(discord.ui.Modal, title="서류 인증"):
         max_length=40,
     )
 
-    def __init__(self, bot: MindFinderBot, service: VerificationService) -> None:
+    def __init__(
+        self,
+        bot: MindFinderBot,
+        service: VerificationService,
+        hospital_id: int,
+    ) -> None:
         super().__init__()
         self.bot = bot
         self.service = service
-        # 병원 드롭다운 (load() 에서 실제 목록으로 채운다)
-        self.선택병원 = discord.ui.Select(
-            placeholder="병원을 선택하세요",
-            min_values=1,
-            max_values=1,
-            options=[discord.SelectOption(label="불러오는 중…", value="0")],
-            custom_id="mf:verify:hospital",
-        )
-        self.add_item(self.선택병원)
-
-    async def load(self) -> "UnifiedVerifyModal":
-        """드롭다운 옵션을 등록된 병원 목록으로 채운다."""
-        hospitals = list(await self.bot.hospitals.list_all())
-        options = [
-            discord.SelectOption(
-                label=hospital_display_name(h.name)[:100], value=str(h.id)
-            )
-            for h in hospitals[:25]
-        ]
-        if not options:
-            options = [discord.SelectOption(label="등록된 병원이 없습니다", value="0")]
-        self.선택병원.options = options
-        return self
+        self.hospital_id = hospital_id
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        hospital_id = int(self.선택병원.values[0]) if self.선택병원.values else 0
-        hospital = (
-            await self.bot.hospitals.get_by_id(hospital_id) if hospital_id else None
-        )
+        hospital = await self.bot.hospitals.get_by_id(self.hospital_id)
         if hospital is None:
             await interaction.response.send_message(
-                "⚠️ 병원을 선택해주세요.", ephemeral=True
+                "⚠️ 병원을 찾을 수 없습니다.", ephemeral=True
             )
             return
 
@@ -1006,23 +986,113 @@ class KnowledgeUserSelectView(discord.ui.View):
 
 
 # --------------------------------------------------------------------------- #
+# 병원 선택 드롭다운 (서류 인증 1단계) — 창 대신 뷰
+# --------------------------------------------------------------------------- #
+class HospitalPickView(discord.ui.View):
+    """인증할 병원을 드롭다운에서 고른다 (고르면 기간 입력 창이 열린다)."""
+
+    def __init__(
+        self, bot: MindFinderBot, service: VerificationService, hospitals: list
+    ) -> None:
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.service = service
+        options = [
+            discord.SelectOption(
+                label=hospital_display_name(h.name)[:100], value=str(h.id)
+            )
+            for h in hospitals[:25]
+        ]
+        select: discord.ui.Select = discord.ui.Select(
+            placeholder="병원을 선택하세요", options=options
+        )
+        select.callback = self._on_select  # type: ignore[method-assign]
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        values = interaction.data.get("values", []) if interaction.data else []
+        if not values:
+            await interaction.response.send_message(
+                "선택이 취소되었습니다.", ephemeral=True
+            )
+            return
+        hospital_id = int(values[0])
+        await interaction.response.send_modal(
+            UnifiedVerifyModal(self.bot, self.service, hospital_id)
+        )
+
+
+# --------------------------------------------------------------------------- #
 # 인증 패널 (영구 뷰) — 🔐-인증 채널
 # --------------------------------------------------------------------------- #
 class VerifyPanelView(discord.ui.View):
-    """인증 전용 패널: 입원 이력 등록 / 서류 인증 / 내 이력."""
+    """인증 전용 패널: 버튼 대신 하나의 드롭다운(선택)으로 모든 기능을 제공한다."""
 
     def __init__(self, bot: MindFinderBot) -> None:
         super().__init__(timeout=None)
         self.bot = bot
         self.vservice = VerificationService(bot)
+        select: discord.ui.Select = discord.ui.Select(
+            placeholder="무엇을 할까요? (인증 메뉴)",
+            custom_id="mf:v_action",
+            options=[
+                discord.SelectOption(
+                    label="입원 이력 등록", value="admission", emoji="📝",
+                    description="병원·기간을 입력해 자기 신고 이력을 등록",
+                ),
+                discord.SelectOption(
+                    label="서류 인증", value="verify", emoji="📄",
+                    description="병원을 고른 뒤 서류·기간으로 2단계 인증",
+                ),
+                discord.SelectOption(
+                    label="기타 방법 인증", value="other", emoji="✍️",
+                    description="서류·지식 외 방법으로 관리자 수동 승인 요청",
+                ),
+                discord.SelectOption(
+                    label="지식기반 질문 보내기", value="ask", emoji="❓",
+                    description="같은 병원·시기 동료에게 병동 경험 질문 보내기",
+                ),
+                discord.SelectOption(
+                    label="지식 인증 현황", value="kstatus", emoji="🧠",
+                    description="받은 질문 답변 / 보낸 질문 판정",
+                ),
+                discord.SelectOption(
+                    label="기타 병원 직접 입력", value="request", emoji="🏥",
+                    description="목록에 없는 병원을 직접 입력해 등록 요청",
+                ),
+                discord.SelectOption(
+                    label="내 이력", value="history", emoji="📋",
+                    description="내 입원 이력과 인증 상태 확인",
+                ),
+            ],
+        )
+        select.callback = self._on_action  # type: ignore[method-assign]
+        self.add_item(select)
 
-    @discord.ui.button(
-        label="입원 이력 등록", style=discord.ButtonStyle.primary,
-        custom_id="mf:v_admission", row=0,
-    )
-    async def admission(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
-    ) -> None:
+    async def _on_action(self, interaction: discord.Interaction) -> None:
+        values = interaction.data.get("values", []) if interaction.data else []
+        if not values:
+            await interaction.response.send_message(
+                "선택이 취소되었습니다.", ephemeral=True
+            )
+            return
+        handler = {
+            "admission": self._do_admission,
+            "verify": self._do_verify,
+            "other": self._do_other,
+            "ask": self._do_ask,
+            "kstatus": self._do_kstatus,
+            "request": self._do_request,
+            "history": self._do_history,
+        }.get(values[0])
+        if handler is None:
+            await interaction.response.send_message(
+                "알 수 없는 선택입니다.", ephemeral=True
+            )
+            return
+        await handler(interaction)
+
+    async def _do_admission(self, interaction: discord.Interaction) -> None:
         async def _proceed(inner: discord.Interaction) -> None:
             await inner.response.send_modal(AdmissionModal(self.bot, self.vservice))
 
@@ -1030,32 +1100,26 @@ class VerifyPanelView(discord.ui.View):
             return
         await _proceed(interaction)
 
-    @discord.ui.button(
-        label="서류 인증", style=discord.ButtonStyle.success,
-        custom_id="mf:v_verify", row=0,
-    )
-    async def verify(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
-    ) -> None:
-        """창(모달)에서 병원을 고르고 기간/PDF 를 입력해 인증한다."""
-
+    async def _do_verify(self, interaction: discord.Interaction) -> None:
         async def _proceed(inner: discord.Interaction) -> None:
-            modal = await UnifiedVerifyModal(self.bot, self.vservice).load()
-            await inner.response.send_modal(modal)
+            hospitals = list(await self.bot.hospitals.list_all())
+            if not hospitals:
+                await inner.response.send_message(
+                    "등록된 병원이 없습니다. ‘기타 병원 직접 입력’으로 요청해 주세요.",
+                    ephemeral=True,
+                )
+                return
+            await inner.response.send_message(
+                "인증할 **병원을 선택**하세요.",
+                view=HospitalPickView(self.bot, self.vservice, hospitals),
+                ephemeral=True,
+            )
 
         if not await ensure_consent(self.bot, interaction, _proceed):
             return
         await _proceed(interaction)
 
-    @discord.ui.button(
-        label="기타 방법 인증", style=discord.ButtonStyle.secondary,
-        custom_id="mf:v_other", row=1,
-    )
-    async def other_method(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
-    ) -> None:
-        """서류·지식기반 외의 방법으로 인증을 신청한다 (관리자 수동 승인)."""
-
+    async def _do_other(self, interaction: discord.Interaction) -> None:
         async def _proceed(inner: discord.Interaction) -> None:
             await inner.response.send_modal(OtherVerifyModal(self.bot, self.vservice))
 
@@ -1063,13 +1127,7 @@ class VerifyPanelView(discord.ui.View):
             return
         await _proceed(interaction)
 
-    @discord.ui.button(
-        label="지식기반 질문 보내기", style=discord.ButtonStyle.secondary,
-        custom_id="mf:v_ask", row=1,
-    )
-    async def ask_knowledge(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
-    ) -> None:
+    async def _do_ask(self, interaction: discord.Interaction) -> None:
         """서류 인증자로서 동료에게 병동 경험 질문을 보낸다 (지식기반 인증)."""
         if interaction.guild is None:
             await interaction.response.send_message(
@@ -1122,13 +1180,7 @@ class VerifyPanelView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(
-        label="지식 인증 현황", style=discord.ButtonStyle.secondary,
-        custom_id="mf:v_kstatus", row=1,
-    )
-    async def knowledge_status(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
-    ) -> None:
+    async def _do_kstatus(self, interaction: discord.Interaction) -> None:
         """내가 받은 질문(답변)과 내가 보낸 질문(판정)을 한 번에 보여준다."""
         to_answer = await self.bot.knowledge_service.list_for_respondent(
             interaction.user.id, "awaiting_answer"
@@ -1167,13 +1219,7 @@ class VerifyPanelView(discord.ui.View):
                 ephemeral=True,
             )
 
-    @discord.ui.button(
-        label="기타 병원 직접 입력", style=discord.ButtonStyle.secondary,
-        custom_id="mf:v_request", row=0,
-    )
-    async def request_hospital(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
-    ) -> None:
+    async def _do_request(self, interaction: discord.Interaction) -> None:
         """목록에 없는 병원을 직접 입력해 등록을 요청한다 (관리자 승인 후 추가)."""
 
         async def _proceed(inner: discord.Interaction) -> None:
@@ -1183,13 +1229,7 @@ class VerifyPanelView(discord.ui.View):
             return
         await _proceed(interaction)
 
-    @discord.ui.button(
-        label="내 이력", style=discord.ButtonStyle.secondary,
-        custom_id="mf:v_history", row=0,
-    )
-    async def history(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
-    ) -> None:
+    async def _do_history(self, interaction: discord.Interaction) -> None:
         rows = await self.bot.admissions.list_by_user(interaction.user.id)
         if not rows:
             await interaction.response.send_message(
@@ -2143,7 +2183,7 @@ class PanelCog(commands.Cog):
             title="🔐 인증",
             description=(
                 "이곳에서 **입원 이력**을 등록하고 **서류 인증**을 받습니다.\n"
-                "아래 버튼을 누르면 입력 창이 열립니다."
+                "아래 **메뉴(드롭다운)** 에서 원하는 항목을 선택하세요."
             ),
             color=discord.Color.green(),
         )

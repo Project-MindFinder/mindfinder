@@ -61,6 +61,9 @@ class FakeThread:
     async def add_user(self, member) -> None:  # noqa: ANN001
         self.members.append(member.id)
 
+    async def edit(self, **kwargs) -> None:  # noqa: ANN003
+        self.edited = kwargs
+
 
 class FakeTextChannel:
     def __init__(self, channel_id: int, name: str, category=None) -> None:
@@ -84,11 +87,27 @@ class FakeTextChannel:
             yield _
 
 
+class FakeForumChannel(FakeTextChannel):
+    """포럼 채널 대역: create_thread 가 (thread, message) 튜플을 반환한다."""
+
+    async def create_thread(self, name: str, content=None, reason=None):  # noqa: ANN001, ANN003
+        thread = FakeThread(name)
+        self.threads.append(thread)
+        return (thread, None)
+
+    async def edit(self, **kwargs) -> None:  # noqa: ANN003
+        self.overwrites = kwargs.get("overwrites", self.overwrites)
+
+
 class FakeCategory:
     def __init__(self, category_id: int, name: str) -> None:
         self.id = category_id
         self.name = name
         self.text_channels: list[FakeTextChannel] = []
+
+    @property
+    def channels(self) -> list[FakeTextChannel]:
+        return self.text_channels
 
 
 class FakeGuild:
@@ -135,6 +154,16 @@ class FakeGuild:
         self, name: str, category=None, overwrites=None, topic=None, reason=None
     ) -> FakeTextChannel:  # noqa: ANN001
         channel = FakeTextChannel(self._next_id(), name, category=category)
+        channel.overwrites = overwrites
+        self.text_channels.append(channel)
+        if category is not None:
+            category.text_channels.append(channel)
+        return channel
+
+    async def create_forum_channel(
+        self, name: str, category=None, overwrites=None, topic=None, reason=None
+    ) -> FakeForumChannel:  # noqa: ANN001
+        channel = FakeForumChannel(self._next_id(), name, category=category)
         channel.overwrites = overwrites
         self.text_channels.append(channel)
         if category is not None:
@@ -225,16 +254,16 @@ async def test_ensure_all_is_idempotent(service: ChannelService) -> None:
     assert first == second
 
 
-async def test_ensure_all_creates_hospital_channel_without_role(
+async def test_ensure_all_creates_hospital_forum_without_role(
     service: ChannelService, bot: FakeBot
 ) -> None:
-    """병원 채널은 만들되, 역할은 사용자가 선택(opt-in)할 때만 만든다."""
+    """병원 '포럼'은 만들되, 역할은 사용자가 선택(opt-in)할 때만 만든다."""
     hospital = await bot.hospitals.create("서울대학교병원", "서울대학교병원")
     guild = FakeGuild()
     await service.ensure_all(guild)  # type: ignore[arg-type]
 
-    names = {c.name for c in guild.text_channels}
-    assert f"🏥-{hospital.name}" in names
+    forums = [c for c in guild.text_channels if isinstance(c, FakeForumChannel)]
+    assert any(c.name == f"🏥-{hospital.name}" for c in forums)
     # 아무도 역할을 선택하지 않았으므로 병원 역할은 생성되지 않는다.
     assert not any(r.name.startswith("MF·") for r in guild.roles)
     assert not any(r.name.endswith("인증됨") and "서울대" in r.name for r in guild.roles)
