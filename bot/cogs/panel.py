@@ -19,6 +19,11 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.core import MindFinderBot
+from bot.services.channels import (
+    PANEL_CHANNEL_KEY,
+    PANEL_CHANNEL_NAME as MANAGED_PANEL_CHANNEL_NAME,
+    VERIFY_CHANNEL_KEY,
+)
 from bot.services.matching import Candidate, MatchingService
 from bot.services.verification import VERIFICATION_LABEL, VerificationService
 from bot.ui.consent import build_consent_embed, ensure_consent
@@ -531,10 +536,32 @@ class PanelCog(commands.Cog):
             return
         self._panel_ready = True
         for guild in self.bot.guilds:
+            # 1) 용도별 채널/카테고리 전체 구성 (인증/패널/커뮤니티/공지/병원별)
+            try:
+                await self.bot.channel_service.ensure_all(guild)
+            except Exception:  # noqa: BLE001 - 한 서버 실패가 전체를 막지 않도록
+                logger.exception("채널 자동 구성 실패: guild=%s", guild.id)
+            # 2) 상시 패널 게시
             try:
                 await self.ensure_panel(guild)
             except Exception:  # noqa: BLE001 - 한 서버 실패가 전체를 막지 않도록
                 logger.exception("패널 게시 실패: guild=%s", guild.id)
+
+    async def _managed_channel_id(
+        self, guild: discord.Guild, key: str
+    ) -> Optional[int]:
+        """설정(.env) 또는 DB에 기록된 관리 대상 채널 ID를 반환한다.
+
+        패널/인증 채널은 시작 시 [`ChannelService.ensure_all()`] 가 구성하면서
+        `managed_channels` 에 기록된다. 설정값이 있으면 그 값을 우선한다.
+        """
+        settings = self.bot.settings
+        if key == PANEL_CHANNEL_KEY and settings.panel_channel_id:
+            return settings.panel_channel_id
+        if key == VERIFY_CHANNEL_KEY and settings.verification_channel_id:
+            return settings.verification_channel_id
+        record = await self.bot.managed_channels.get(guild.id, key)
+        return record.discord_id if record is not None else None
 
     async def _resolve_panel_channel(
         self, guild: discord.Guild
@@ -549,11 +576,17 @@ class PanelCog(commands.Cog):
             logger.warning(
                 "PANEL_CHANNEL_ID(%s) 채널을 찾을 수 없습니다.", settings.panel_channel_id
             )
-        # 2) 이름으로 검색
+        # 2) ChannelService 가 자동 구성한 관리 대상 채널 재사용 (중복 생성 방지)
+        record = await self.bot.managed_channels.get(guild.id, PANEL_CHANNEL_KEY)
+        if record is not None:
+            managed = guild.get_channel(record.discord_id)
+            if isinstance(managed, discord.TextChannel):
+                return managed
+        # 3) 이름으로 검색 (자동 구성 이름 → 레거시 이름 순)
         for ch in guild.text_channels:
-            if ch.name == PANEL_CHANNEL_NAME:
+            if ch.name in (MANAGED_PANEL_CHANNEL_NAME, PANEL_CHANNEL_NAME):
                 return ch
-        # 3) 자동 생성
+        # 4) 자동 생성
         if not settings.auto_create_panel_channel:
             return None
         try:
@@ -665,14 +698,11 @@ class PanelCog(commands.Cog):
         if not message.attachments:
             return
 
-        # 패널 채널에서만 동작
+        # 패널 채널에서만 동작 (자동 구성된 채널 포함)
         settings = self.bot.settings
-        panel_channel_id = None
-        if settings.panel_channel_id:
-            panel_channel_id = settings.panel_channel_id
-        else:
-            ch = await self._resolve_panel_channel(message.guild)
-            panel_channel_id = ch.id if ch else None
+        panel_channel_id = await self._managed_channel_id(
+            message.guild, PANEL_CHANNEL_KEY
+        )
         if panel_channel_id is None or message.channel.id != panel_channel_id:
             return
 
@@ -698,7 +728,7 @@ class PanelCog(commands.Cog):
             pdf_bytes=pdf_bytes,
         )
         if result.approved:
-            await self._grant_verified_role(message.guild, message.author.id)
+            await self._grant_verified_access(message.guild, message.author.id, result)
 
         color = {
             "green": discord.Color.green(),
@@ -715,17 +745,43 @@ class PanelCog(commands.Cog):
         except discord.HTTPException:
             logger.warning("진위확인 결과 응답 실패: channel=%s", message.channel.id)
 
-    async def _grant_verified_role(self, guild: discord.Guild, user_id: int) -> None:
-        role_id = self.bot.settings.verified_role_id
-        if not role_id:
-            return
+    async def _grant_verified_access(
+        self, guild: discord.Guild, user_id: int, result=None
+    ) -> None:
+        """자동 진위확인 통과자에게 2단계 역할 + 병원 역할/채널을 부여한다."""
         member = guild.get_member(user_id)
-        role = guild.get_role(role_id)
-        if member and role:
-            try:
-                await member.add_roles(role, reason="자동 진위확인 인증")
-            except discord.Forbidden:
-                logger.warning("인증 역할 부여 권한 없음: user=%s", user_id)
+        if member is None:
+            return
+        # 2단계(서류 인증) 역할 (설정된 VERIFIED_ROLE_ID 가 있으면 함께 부여)
+        try:
+            await self.bot.access.grant_tier(guild, member, 2)
+        except Exception:  # noqa: BLE001
+            logger.exception("2단계 역할 부여 실패: user=%s", user_id)
+        role_id = self.bot.settings.verified_role_id
+        if role_id:
+            role = guild.get_role(role_id)
+            if role is not None:
+                try:
+                    await member.add_roles(role, reason="자동 진위확인 인증")
+                except discord.Forbidden:
+                    logger.warning("인증 역할 부여 권한 없음: user=%s", user_id)
+
+        # 병원 역할 + 병원 채널 확보
+        hospital_name = getattr(result, "hospital_name", None)
+        if not hospital_name:
+            return
+        hospital = await self.bot.hospitals.get_by_name(hospital_name)
+        if hospital is None:
+            hospital = await self.vservice.resolve_hospital(hospital_name)
+        try:
+            await self.bot.access.grant_hospital_role(
+                guild, member, hospital.id, hospital.name
+            )
+            await self.bot.channel_service.ensure_hospital_channel(
+                guild, hospital.id, hospital.name
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("병원 역할/채널 처리 실패: hospital=%s", hospital.id)
 
     # ---------- 관리자: 패널 수동 재게시 ----------
 
@@ -747,6 +803,38 @@ class PanelCog(commands.Cog):
         embed = self._build_panel_embed()
         await interaction.channel.send(embed=embed, view=MainPanelView(self.bot))
         await interaction.followup.send("✅ 패널을 게시했습니다.", ephemeral=True)
+
+    # ---------- 관리자: 채널 구성 재실행 ----------
+
+    @app_commands.command(
+        name="채널구성", description="[관리자] 용도별 채널/카테고리를 (재)구성합니다."
+    )
+    async def setup_channels(self, interaction: discord.Interaction) -> None:
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message(
+                "관리자만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "서버에서만 사용할 수 있습니다.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await self.bot.channel_service.ensure_all(interaction.guild)
+            await self.ensure_panel(interaction.guild)
+        except Exception:  # noqa: BLE001
+            logger.exception("채널 구성 실패: guild=%s", interaction.guild.id)
+            await interaction.followup.send(
+                "⚠️ 채널 구성 중 오류가 발생했습니다. "
+                "봇에 '채널 관리' 권한이 있는지 확인해주세요.",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            "✅ 용도별 채널/카테고리 구성을 완료했습니다.", ephemeral=True
+        )
 
 
 async def setup(bot: commands.Bot) -> None:

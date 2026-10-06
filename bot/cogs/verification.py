@@ -25,6 +25,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.core import MindFinderBot
+from bot.services.channels import VERIFY_CHANNEL_KEY
 from bot.services.verification import VERIFICATION_LABEL, VerificationService
 from bot.ui.consent import ensure_consent
 from bot.ui.hospitals import HospitalSelectView
@@ -158,10 +159,12 @@ class VerificationCog(commands.Cog):
         """
         if message.author.bot or message.guild is None:
             return
-        settings = self.bot.settings
-        if not settings.verification_channel_id:
+        verification_channel_id = await self._resolve_verification_channel_id(
+            message.guild
+        )
+        if verification_channel_id is None:
             return
-        if message.channel.id != settings.verification_channel_id:
+        if message.channel.id != verification_channel_id:
             return
         if not message.attachments:
             return
@@ -196,6 +199,19 @@ class VerificationCog(commands.Cog):
         await self.bot.verifications.set_proof_message(
             request_id, message.channel.id, message.id
         )
+
+    async def _resolve_verification_channel_id(
+        self, guild: discord.Guild
+    ) -> Optional[int]:
+        """증빙 서류를 받을 심사 채널 ID를 반환한다.
+
+        설정(VERIFICATION_CHANNEL_ID)이 있으면 우선하고, 없으면 시작 시
+        [`ChannelService.ensure_all()`] 가 자동 구성한 `🔐-인증` 채널을 사용한다.
+        """
+        if self.bot.settings.verification_channel_id:
+            return self.bot.settings.verification_channel_id
+        record = await self.bot.managed_channels.get(guild.id, VERIFY_CHANNEL_KEY)
+        return record.discord_id if record is not None else None
 
     @classmethod
     def _parse_request_id(cls, content: str) -> Optional[int]:
