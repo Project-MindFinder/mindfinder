@@ -280,7 +280,7 @@ class ChannelService:
         if not self.bot.settings.auto_create_channels:
             return None
         try:
-            channel = await guild.create_forum_channel(
+            channel = await guild.create_forum(
                 name=name,
                 category=category,
                 overwrites=overwrites,

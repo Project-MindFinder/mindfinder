@@ -160,7 +160,7 @@ class FakeGuild:
             category.text_channels.append(channel)
         return channel
 
-    async def create_forum_channel(
+    async def create_forum(
         self, name: str, category=None, overwrites=None, topic=None, reason=None
     ) -> FakeForumChannel:  # noqa: ANN001
         channel = FakeForumChannel(self._next_id(), name, category=category)

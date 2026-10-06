@@ -93,14 +93,13 @@ class TermsService:
     # ---------- 게시 ----------
 
     async def _delete_previous(self, channel: discord.TextChannel) -> None:
-        """이전에 게시한 약관 메시지를 지운다 (중복 방지)."""
+        """이전에 게시한 약관 메시지를 모두 지운다 (중복 방지).
+
+        약관 채널은 봇 전용(읽기 전용)이므로 봇이 올린 메시지를 전부 지운다.
+        """
         try:
-            async for msg in channel.history(limit=50):
-                if (
-                    msg.author.id == self.bot.user.id
-                    and msg.content
-                    and msg.content.startswith("📜 MindFinder")
-                ):
+            async for msg in channel.history(limit=100):
+                if msg.author.id == self.bot.user.id:
                     try:
                         await msg.delete()
                     except discord.HTTPException:
