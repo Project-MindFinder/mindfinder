@@ -68,6 +68,17 @@ class Settings:
     crisis_channel_id: int | None = None
     # 매칭 채널을 생성할 카테고리 ID (선택)
     match_category_id: int | None = None
+    # 상시 패널(버튼 안내판)을 게시할 채널 ID (선택, 비우면 자동 생성)
+    panel_channel_id: int | None = None
+    # 패널 채널이 없으면 봇이 자동으로 만들지 여부
+    auto_create_panel_channel: bool = True
+
+    # --- 디스코드 특권 인텐트 (선택) ---
+    # 개발자 포털에서 활성화하지 않았다면 false 로 두어야 봇이 로그인할 수 있다.
+    # - members: 역할 부여/조회 (인증 배지)에 필요
+    # - message_content: 위기 대응 키워드 감지에 필요
+    enable_members_intent: bool = True
+    enable_message_content_intent: bool = True
 
     # --- 서울대병원 문서 진위확인 API (선택) ---
     # 진위확인 자동 검증 기능 사용 여부
@@ -130,6 +141,12 @@ def load_settings(env_file: str | os.PathLike[str] | None = None) -> Settings:
         verification_channel_id=_get_int("VERIFICATION_CHANNEL_ID"),
         crisis_channel_id=_get_int("CRISIS_CHANNEL_ID"),
         match_category_id=_get_int("MATCH_CATEGORY_ID"),
+        panel_channel_id=_get_int("PANEL_CHANNEL_ID"),
+        auto_create_panel_channel=_get_bool("AUTO_CREATE_PANEL_CHANNEL", True),
+        enable_members_intent=_get_bool("ENABLE_MEMBERS_INTENT", True),
+        enable_message_content_intent=_get_bool(
+            "ENABLE_MESSAGE_CONTENT_INTENT", True
+        ),
         snuh_truth_enabled=_get_bool("SNUH_TRUTH_ENABLED", True),
         snuh_truth_base_url=(
             os.getenv("SNUH_TRUTH_BASE_URL", "").strip()

@@ -4,10 +4,11 @@
 
 ## 핵심 기능
 
-1. **입원 이력 인증** — 어떤 병원에 언제·얼마나 입원했는지 등록 (자기 신고 + 선택적 서류 심사)
-2. **자동 진위확인** — 서울대병원 입퇴원 사실확인서 PDF 를 올리면 진위·정신과 여부를 자동 검증해 **즉시 인증** ([아래 참고](#서울대병원-입퇴원-사실확인서-자동-진위확인))
-3. **동료 매칭** — 같은 시기·같은 병원에 입원했던 사람끼리 (매칭을 원하는 사람에 한해) **비공개 채널**에서 대화
-4. **커뮤니티** — 전체 / 병원 / 기간 단위로 이야기를 나눌 수 있는 공간
+1. **버튼 패널** — 서버의 `mindfinder-패널` 채널에 **항상 떠 있는 안내 메시지**의 버튼만 눌러 인증·매칭을 이용 (슬래시 커맨드 없이도 가능, [아래 참고](#상시-패널-버튼-ui))
+2. **입원 이력 인증** — 어떤 병원에 언제·얼마나 입원했는지 등록 (자기 신고 + 선택적 서류 심사)
+3. **자동 진위확인** — 서울대병원 입퇴원 사실확인서 PDF 를 올리면 진위·정신과 여부를 자동 검증해 **즉시 인증** ([아래 참고](#서울대병원-입퇴원-사실확인서-자동-진위확인))
+4. **동료 매칭** — 같은 시기·같은 병원에 입원했던 사람끼리 (매칭을 원하는 사람에 한해) **비공개 채널**에서 대화
+5. **커뮤니티** — 전체 / 병원 / 기간 단위로 이야기를 나눌 수 있는 공간
 
 > ⚠️ **개인정보 보호 원칙**: 봇은 전화번호/SNS를 **저장하거나 전달하지 않습니다**. 매칭이 성사되면 봇이 **비공개 채널**을 만들어 당사자들만 초대하며, 봇은 채널 접근 권한만 관리합니다.
 >
@@ -41,6 +42,13 @@ run.bat
 
 `run.bat` 은 최초 실행 시 자동으로 가상환경 생성 + 의존성 설치 + 봇 실행을 수행합니다.
 
+> ⚠️ **특권 인텐트(Presence/Server Members/Message Content)**: 봇이 로그인하려면
+> [Discord Developer Portal](https://discord.com/developers/applications) → **Bot** →
+> **Privileged Gateway Intents** 에서 **Server Members Intent** 와 **Message Content Intent** 를
+> **활성화**해야 합니다. 활성화하지 않으면 봇이 `PrivilegedIntentsRequired` 오류로 종료됩니다.
+> 부득이하게 켤 수 없다면 `.env` 에서 `ENABLE_MEMBERS_INTENT=false` /
+> `ENABLE_MESSAGE_CONTENT_INTENT=false` 로 설정하세요. (인증 배지 부여·위기 키워드 감지가 제한됩니다.)
+
 ### 3. 수동 설치 (macOS/Linux)
 
 ```bash
@@ -63,12 +71,28 @@ python -m bot.main
 | `VERIFICATION_CHANNEL_ID` | | 증빙 서류 제출 비공개 채널 ID |
 | `CRISIS_CHANNEL_ID` | | 위기 안내 채널 ID (선택) |
 | `MATCH_CATEGORY_ID` | | 매칭 비공개 채널을 만들 카테고리 ID (선택, 비우면 서버 최상위) |
+| `PANEL_CHANNEL_ID` | | 상시 패널(버튼 안내판)을 게시할 채널 ID (선택, 비우면 `mindfinder-패널` 자동 탐색/생성) |
+| `AUTO_CREATE_PANEL_CHANNEL` | | 패널 채널이 없으면 자동 생성할지 여부 (기본 `true`) |
+| `ENABLE_MEMBERS_INTENT` | | `members` 특권 인텐트 사용 여부 (기본 `true`, 포털 미활성화 시 `false`) |
+| `ENABLE_MESSAGE_CONTENT_INTENT` | | `message_content` 특권 인텐트 사용 여부 (기본 `true`, 포털 미활성화 시 `false`) |
 | `SNUH_TRUTH_ENABLED` | | 서울대병원 자동 진위확인 사용 여부 (기본 `true`) |
 | `SNUH_TRUTH_BASE_URL` | | 진위확인 사이트 주소 (기본 `https://sdoc.snuh.org`) |
 | `SNUH_TRUTH_TIMEOUT` | | 진위확인 요청 타임아웃 초 (기본 `20`) |
 | `DATABASE_PATH` | | SQLite 파일 경로 (기본 `data/mindfinder.db`) |
 | `LOG_DIR` | | 로그 디렉터리 (기본 `logs`) |
 | `LOG_LEVEL` | | 로그 레벨 (기본 `INFO`) |
+
+## 상시 패널 (버튼 UI)
+
+슬래시 커맨드를 외우지 않아도 되도록, 봇은 서버에 **상시 안내 패널**을 게시합니다.
+사용자는 채널에 **항상 떠 있는 한 개의 메시지**에서 버튼만 눌러 기능을 이용합니다.
+
+- 봇이 시작되면 `mindfinder-패널` 채널을 찾고, 없으면 **자동으로 생성**합니다.
+  (`PANEL_CHANNEL_ID` 로 채널을 지정하거나, `AUTO_CREATE_PANEL_CHANNEL=false` 로 자동 생성을 끌 수 있습니다.)
+- 패널 메시지는 **영구 뷰(persistent view)** 로 게시되어 봇을 재시작해도 버튼이 계속 동작합니다.
+- 제공 버튼: **입원 이력 등록**(모달) · **서울대병원 서류 인증** · **내 이력** · **매칭 켜기/끄기** · **동료 찾기** · **받은 신청** · **내 매칭 채널** · **도움말**
+- 서울대병원 사실확인서 **PDF 를 패널 채널에 그대로 올리면** 자동 진위확인 후 즉시 인증됩니다.
+- 슬래시 커맨드도 그대로 유지되어 **둘 다** 사용할 수 있습니다. (관리자는 `/패널` 로 패널 메시지를 다시 게시/갱신할 수 있습니다.)
 
 ## 주요 명령어
 
@@ -132,12 +156,16 @@ mindfinder/
 │   │   ├── database.py      # async 엔진/세션
 │   │   ├── repositories.py  # 데이터 접근
 │   │   └── seed.py          # 시드 실행
-│   ├── cogs/                # 슬래시 커맨드
+│   ├── cogs/                # 슬래시 커맨드 + 상시 패널
 │   │   ├── general.py       # 도움말/병원목록
 │   │   ├── verification.py  # 인증/심사
 │   │   ├── matching.py      # 매칭 (후보/신청/비공개 채널)
+│   │   ├── panel.py         # 상시 패널(버튼/모달) + PDF 자동 진위확인
 │   │   ├── community.py     # 커뮤니티
 │   │   └── crisis.py        # 위기 대응
+│   ├── services/            # UI 비의존 도메인 서비스
+│   │   ├── verification.py  # 인증/진위확인 로직
+│   │   └── matching.py      # 매칭 로직
 │   ├── data/                # 시드 데이터
 │   └── utils/               # 기간/병원 유틸
 │       ├── periods.py       # 기간(연·월) 검증

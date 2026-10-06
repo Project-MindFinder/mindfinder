@@ -26,6 +26,8 @@ from bot.db.repositories import (
     UserRepository,
     VerificationRepository,
 )
+from bot.services.matching import MatchingService
+from bot.services.verification import VerificationService
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +40,11 @@ class MindFinderBot(commands.Bot):
         # - guilds: 서버 정보
         # - members: 역할 부여/조회 (인증 배지)
         # - message_content: 위기 대응 키워드 감지에 필요 (선택적 기능)
+        # 특권 인텐트(members, message_content)는 디스코드 개발자 포털에서
+        # 활성화해야 하므로, 미활성화 환경에서는 .env 로 끌 수 있게 한다.
         intents = discord.Intents.default()
-        intents.members = True
-        intents.message_content = True
+        intents.members = settings.enable_members_intent
+        intents.message_content = settings.enable_message_content_intent
 
         super().__init__(
             command_prefix="!",  # 슬래시 커맨드 중심이지만 접두사 명령도 허용
@@ -52,7 +56,9 @@ class MindFinderBot(commands.Bot):
         self.db = Database(settings.database_path)
 
         # 리포지토리 (DB 연결 후에도 재사용 가능한 객체)
-        self.users = UserRepository(self.db)
+        # 주의: discord.Client 는 users/guilds 등 읽기 전용 프로퍼티를 이미 정의하므로
+        #       충돌을 피하기 위해 리포지토리 속성에는 user_repo 처럼 접미사를 붙인다.
+        self.user_repo = UserRepository(self.db)
         self.hospitals = HospitalRepository(self.db)
         self.admissions = AdmissionRepository(self.db)
         self.verifications = VerificationRepository(self.db)
@@ -60,6 +66,10 @@ class MindFinderBot(commands.Bot):
         self.match_requests = MatchRequestRepository(self.db)
         self.match_channels = MatchChannelRepository(self.db)
         self.audit = AuditRepository(self.db)
+
+        # 도메인 서비스 (UI 비의존). 슬래시 커맨드와 상시 패널이 공유한다.
+        self.verification_service = VerificationService(self)
+        self.matching_service = MatchingService(self)
 
     async def setup_hook(self) -> None:
         """봇 로그인 직후 실행. DB 연결, 시드, 코그 로드."""
@@ -76,6 +86,7 @@ class MindFinderBot(commands.Bot):
             "bot.cogs.matching",
             "bot.cogs.community",
             "bot.cogs.crisis",
+            "bot.cogs.panel",
         ):
             try:
                 await self.load_extension(extension)

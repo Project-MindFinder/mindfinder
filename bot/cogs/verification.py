@@ -1,10 +1,12 @@
 """인증 코그: 자기 신고 입원 이력 등록/조회 및 서류 심사.
 
-- /인증 신청  : 병원 + 입원 연월 + 퇴원 연월을 입력받아 자기 신고 이력 저장
-- /내이력     : 내가 등록한 이력 조회 및 삭제
-- /인증 서류제출 : 서류 심사 요청 생성 + 비공개 채널 안내
-- /진위확인   : 서울대병원 입퇴원 사실확인서 PDF 를 자동 진위확인 후 자동 승인
-- /심사 목록|승인|거절 : 관리자 심사 (ADMIN_ROLE_ID 필요)
+- /인증      : 병원 + 입원 연월 + 퇴원 연월을 입력받아 자기 신고 이력 저장
+- /내이력    : 내가 등록한 이력 조회
+- /진위확인  : 서울대병원 입퇴원 사실확인서 PDF 를 자동 진위확인 후 자동 승인
+- /서류제출  : 서류 심사 요청 생성 + 비공개 채널 안내
+- /심사목록|승인|거절 : 관리자 심사 (ADMIN_ROLE_ID 필요)
+
+핵심 로직은 bot/services/verification.py 에 위임한다.
 """
 
 from __future__ import annotations
@@ -17,24 +19,10 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.core import MindFinderBot
-from bot.utils import certificate as certificate_utils
-from bot.utils import hospitals as hospital_utils
-from bot.utils.periods import PeriodError, current_year, validate_period
-from bot.utils.snuh_truth import SnuhTruthClient, SnuhTruthError, TruthStatus
+from bot.services.verification import VERIFICATION_LABEL, VerificationService
+from bot.utils.periods import PeriodError
 
 logger = logging.getLogger(__name__)
-
-# 자동 진위확인에 허용할 PDF 최대 크기 (10MB)
-_MAX_PDF_BYTES = 10 * 1024 * 1024
-# 진위확인 자동 검증을 지원하는 병원 키
-_TRUTH_SUPPORTED_HOSPITALS = {"snuh"}
-
-# 인증 상태 표시
-_VERIFICATION_LABEL = {
-    "self_reported": "🟡 자기 신고 (미인증)",
-    "verified": "🟢 인증 완료",
-    "rejected": "🔴 인증 반려",
-}
 
 
 class VerificationCog(commands.Cog):
@@ -42,22 +30,7 @@ class VerificationCog(commands.Cog):
 
     def __init__(self, bot: MindFinderBot) -> None:
         self.bot = bot
-
-    # ---------- 헬퍼 ----------
-
-    async def _resolve_hospital(self, raw_name: str):
-        """입력 병원명을 대표 병원으로 정규화하고, 없으면 새로 만든다."""
-        canonical = hospital_utils.resolve_canonical(raw_name)
-        normalized = hospital_utils.normalize_name(canonical)
-
-        hospital = await self.bot.hospitals.get_by_normalized(normalized)
-        if hospital is None:
-            # 별칭/원본명으로도 검색
-            hospital = await self.bot.hospitals.get_by_name(canonical)
-        if hospital is None:
-            hospital = await self.bot.hospitals.create(canonical, normalized)
-            logger.info("새 병원 등록: %s", canonical)
-        return hospital
+        self.service = VerificationService(bot)
 
     # ---------- 자기 신고 ----------
 
@@ -83,48 +56,33 @@ class VerificationCog(commands.Cog):
         현재입원중: bool = False,
     ) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
-
-        # 1) 기간 검증
         try:
-            period = validate_period(
-                입원연도, 입원월, 퇴원연도, 퇴원월, 현재입원중
+            _admission_id, period, hospital_name = (
+                await self.service.register_admission(
+                    user_id=interaction.user.id,
+                    hospital_name=병원,
+                    start_year=입원연도,
+                    start_month=입원월,
+                    end_year=퇴원연도,
+                    end_month=퇴원월,
+                    is_ongoing=현재입원중,
+                )
             )
         except PeriodError as exc:
             await interaction.followup.send(f"⚠️ {exc}", ephemeral=True)
             return
 
-        # 2) 병원 정규화
-        hospital = await self._resolve_hospital(병원)
-
-        # 3) 저장
-        await self.bot.users.ensure_user(interaction.user.id)
-        admission_id = await self.bot.admissions.add(
-            user_id=interaction.user.id,
-            hospital_id=hospital.id,
-            admit_year=period.start_year,
-            admit_month=period.start_month,
-            discharge_year=period.end_year,
-            discharge_month=period.end_month,
-            is_ongoing=period.is_ongoing,
-        )
-        await self.bot.audit.log(
-            "admission.create",
-            actor_id=interaction.user.id,
-            target=f"admission:{admission_id}",
-            detail=f"{hospital.name} {period.text()}",
-        )
-
         embed = discord.Embed(
             title="✅ 입원 이력이 등록되었습니다",
             description=(
-                f"**병원**: {hospital.name}\n"
+                f"**병원**: {hospital_name}\n"
                 f"**기간**: {period.text()}\n"
-                f"**상태**: {_VERIFICATION_LABEL['self_reported']}"
+                f"**상태**: {VERIFICATION_LABEL['self_reported']}"
             ),
             color=discord.Color.yellow(),
         )
         embed.set_footer(
-            text="서류 심사를 통과하면 인증 배지(🟢)를 받을 수 있습니다. (/인증 서류제출)"
+            text="서류 심사를 통과하면 인증 배지(🟢)를 받을 수 있습니다."
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -146,7 +104,7 @@ class VerificationCog(commands.Cog):
                 name=f"#{adm.id} · {adm.hospital.name}",
                 value=(
                     f"{adm.period_text()}\n"
-                    f"상태: {_VERIFICATION_LABEL.get(adm.verification, adm.verification)}"
+                    f"상태: {VERIFICATION_LABEL.get(adm.verification, adm.verification)}"
                 ),
                 inline=False,
             )
@@ -163,163 +121,35 @@ class VerificationCog(commands.Cog):
     async def verify_truth(
         self, interaction: discord.Interaction, 서류: discord.Attachment
     ) -> None:
-        settings = self.bot.settings
-        if not settings.snuh_truth_enabled:
-            await interaction.response.send_message(
-                "⚠️ 자동 진위확인 기능이 비활성화되어 있습니다. 관리자에게 문의해주세요.",
-                ephemeral=True,
-            )
-            return
-
         await interaction.response.defer(ephemeral=True, thinking=True)
-
-        # 1) 파일 형식/크기 검증
         if not 서류.filename.lower().endswith(".pdf"):
             await interaction.followup.send(
                 "⚠️ PDF 파일만 제출할 수 있습니다.", ephemeral=True
             )
             return
-        if 서류.size and 서류.size > _MAX_PDF_BYTES:
-            await interaction.followup.send(
-                "⚠️ 파일이 너무 큽니다. 10MB 이하의 PDF 를 올려주세요.", ephemeral=True
-            )
-            return
 
         pdf_bytes = await 서류.read()
-
-        # 2) PDF 파싱
-        try:
-            cert = certificate_utils.parse_certificate(pdf_bytes)
-        except certificate_utils.CertificateParseError as exc:
-            await interaction.followup.send(
-                f"⚠️ 서류를 해석할 수 없습니다.\n> {exc}", ephemeral=True
-            )
-            return
-
-        # 3) 지원 병원 여부
-        if cert.hospital_key not in _TRUTH_SUPPORTED_HOSPITALS:
-            await interaction.followup.send(
-                "⚠️ 현재 **서울대학교병원** 발급 서류만 자동 진위확인을 지원합니다.\n"
-                "다른 병원 서류는 `/서류제출` 로 관리자 심사를 이용해주세요.",
-                ephemeral=True,
-            )
-            return
-
-        # 4) 정신건강의학과 입원 여부
-        if not cert.is_psychiatric:
-            await interaction.followup.send(
-                "⚠️ 정신건강의학과(정신과) 입원 이력이 확인되지 않아 인증할 수 없습니다.\n"
-                f"확인된 진료과: {', '.join(cert.departments) or '없음'}",
-                ephemeral=True,
-            )
-            return
-
-        # 5) 문서확인번호 필요
-        if not cert.document_no:
-            await interaction.followup.send(
-                "⚠️ 서류에서 문서확인번호(문서번호)를 찾지 못했습니다.", ephemeral=True
-            )
-            return
-
-        # 6) 중복 문서 방지
-        existing = await self.bot.verifications.find_by_document_no(cert.document_no)
-        if existing is not None:
-            await interaction.followup.send(
-                "⚠️ 이미 등록된 문서입니다. 동일한 서류로는 중복 인증할 수 없습니다.",
-                ephemeral=True,
-            )
-            return
-
-        # 7) 입퇴원 기간 확인 → 입원 이력 생성
-        period = cert.period()
-        if period is None:
-            await interaction.followup.send(
-                "⚠️ 서류에서 입퇴원 기간을 확인할 수 없습니다.", ephemeral=True
-            )
-            return
-        start_year, start_month, end_year, end_month = period
-
-        hospital = await self._resolve_hospital(
-            cert.hospital_name or "서울대학교병원"
-        )
-        await self.bot.users.ensure_user(interaction.user.id)
-        admission_id = await self.bot.admissions.add(
+        result = await self.service.auto_verify_pdf(
             user_id=interaction.user.id,
-            hospital_id=hospital.id,
-            admit_year=start_year,
-            admit_month=start_month,
-            discharge_year=end_year,
-            discharge_month=end_month,
-            is_ongoing=False,
+            filename=서류.filename,
+            pdf_bytes=pdf_bytes,
         )
 
-        # 8) 서울대병원 진위확인 API 호출
-        client = SnuhTruthClient(
-            base_url=settings.snuh_truth_base_url,
-            timeout=settings.snuh_truth_timeout,
-        )
-        try:
-            result = await client.verify(cert.document_no)
-        except SnuhTruthError as exc:
-            logger.warning("진위확인 API 오류: %s", exc)
-            await interaction.followup.send(
-                "⚠️ 진위확인 서버와 통신하지 못했습니다. 잠시 후 다시 시도해주세요.\n"
-                f"> {exc}",
-                ephemeral=True,
-            )
-            return
-
-        approved = result.status is TruthStatus.VALID
-        department_summary = ", ".join(cert.departments) or None
-
-        # 9) 검증 요청 기록 + 이력 상태 반영
-        request_id = await self.bot.verifications.create_auto_verified(
-            user_id=interaction.user.id,
-            admission_id=admission_id,
-            document_no=cert.document_no,
-            is_psychiatric=cert.is_psychiatric,
-            truth_status=result.status.value,
-            truth_message=result.message,
-            department_summary=department_summary,
-            approved=approved,
-            note=(
-                "자동 진위확인 통과"
-                if approved
-                else f"진위확인 실패: {result.message}"
-            ),
-        )
-        await self.bot.admissions.set_verification(
-            admission_id, "verified" if approved else "rejected"
-        )
-        if approved:
+        if result.approved:
             await self._grant_verified_role(interaction, interaction.user.id)
 
-        await self.bot.audit.log(
-            "verification.auto",
-            actor_id=interaction.user.id,
-            target=f"verification:{request_id}",
-            detail=f"{cert.document_no} {result.status.value}",
-        )
-
-        # 10) 결과 응답
+        color = {
+            "green": discord.Color.green(),
+            "red": discord.Color.red(),
+            "orange": discord.Color.orange(),
+        }.get(result.color, discord.Color.orange())
         embed = discord.Embed(
-            title=("✅ 자동 인증 완료" if approved else "❌ 자동 인증 실패"),
-            color=discord.Color.green() if approved else discord.Color.red(),
-            description=(
-                f"**병원**: {cert.hospital_name or hospital.name}\n"
-                f"**진료과**: {department_summary or '확인 불가'}\n"
-                f"**기간**: {start_year}년 {start_month}월 ~ {end_year}년 {end_month}월\n"
-                f"**문서번호**: `{cert.document_no}`\n"
-                f"**발급번호**: {cert.issue_no or '?'}\n"
-                f"**진위확인**: {result.message or result.status.value}"
-            ),
+            title=("✅ " if result.approved else "⚠️ ") + result.title,
+            description=result.detail,
+            color=color,
         )
-        if approved:
+        if result.approved:
             embed.set_footer(text="정신건강의학과 입원 이력이 인증되었습니다.")
-        else:
-            embed.set_footer(
-                text="위조 의심 또는 인터넷 미발급 문서입니다. 관리자에게 문의하세요."
-            )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ---------- 서류 심사 ----------
@@ -347,14 +177,8 @@ class VerificationCog(commands.Cog):
             )
             return
 
-        # 심사 요청 생성
-        request_id = await self.bot.verifications.create(
-            user_id=interaction.user.id, admission_id=admission.id
-        )
-        await self.bot.audit.log(
-            "verification.request",
-            actor_id=interaction.user.id,
-            target=f"verification:{request_id}",
+        request_id = await self.service.submit_proof(
+            interaction.user.id, admission.id
         )
 
         embed = discord.Embed(
@@ -363,7 +187,6 @@ class VerificationCog(commands.Cog):
                 f"입력하신 이력(# {admission.id}, {admission.hospital.name} "
                 f"{admission.period_text()})에 대한 증빙 서류를 제출해주세요.\n\n"
                 f"**제출 채널**: <#{settings.verification_channel_id}>\n"
-                "해당 채널에 다음 형식으로 메시지를 남겨주세요.\n\n"
                 f"`심사번호: {request_id}` 와 함께 서류 이미지/파일 첨부\n\n"
                 "⚠️ 서류는 심사 완료 후 삭제되며, 관리자만 열람합니다."
             ),
@@ -432,25 +255,15 @@ class VerificationCog(commands.Cog):
             )
             return
 
-        req = await self.bot.verifications.get_by_id(심사번호)
-        if req is None or req.status != "pending":
+        req = await self.service.approve(심사번호, interaction.user.id)
+        if req is None:
             await interaction.response.send_message(
                 "유효한 대기 중 심사가 아닙니다.", ephemeral=True
             )
             return
 
-        await self.bot.verifications.resolve(
-            심사번호, "approved", interaction.user.id
-        )
-        if req.admission_id:
-            await self.bot.admissions.set_verification(req.admission_id, "verified")
         await self._grant_verified_role(interaction, req.user_id)
-        await self._delete_proof(interaction, req)
-        await self.bot.audit.log(
-            "verification.approve",
-            actor_id=interaction.user.id,
-            target=f"verification:{심사번호}",
-        )
+        await self._delete_proof(req)
         await interaction.response.send_message(
             f"✅ 심사 #{심사번호} 를 승인했습니다.", ephemeral=True
         )
@@ -469,25 +282,14 @@ class VerificationCog(commands.Cog):
             )
             return
 
-        req = await self.bot.verifications.get_by_id(심사번호)
-        if req is None or req.status != "pending":
+        req = await self.service.reject(심사번호, interaction.user.id, 사유)
+        if req is None:
             await interaction.response.send_message(
                 "유효한 대기 중 심사가 아닙니다.", ephemeral=True
             )
             return
 
-        await self.bot.verifications.resolve(
-            심사번호, "rejected", interaction.user.id, note=사유
-        )
-        if req.admission_id:
-            await self.bot.admissions.set_verification(req.admission_id, "rejected")
-        await self._delete_proof(interaction, req)
-        await self.bot.audit.log(
-            "verification.reject",
-            actor_id=interaction.user.id,
-            target=f"verification:{심사번호}",
-            detail=사유,
-        )
+        await self._delete_proof(req)
         await interaction.response.send_message(
             f"❌ 심사 #{심사번호} 를 거절했습니다.", ephemeral=True
         )
@@ -507,9 +309,7 @@ class VerificationCog(commands.Cog):
             except discord.Forbidden:
                 logger.warning("인증 역할 부여 권한 없음: user=%s", user_id)
 
-    async def _delete_proof(
-        self, interaction: discord.Interaction, req
-    ) -> None:
+    async def _delete_proof(self, req) -> None:
         """심사 완료 후 증빙 메시지를 삭제한다 (개인정보 보호)."""
         if not req.proof_channel_id or not req.proof_message_id:
             return

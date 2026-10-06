@@ -30,6 +30,16 @@ class GeneralCog(commands.Cog):
             color=discord.Color.teal(),
         )
         embed.add_field(
+            name="🖱️ 버튼 패널 (권장)",
+            value=(
+                "서버의 `mindfinder-패널` 채널에 **항상 떠 있는 안내 메시지**의 버튼을\n"
+                "누르면 슬래시 커맨드 없이도 인증·매칭을 이용할 수 있습니다.\n"
+                "PDF 사실확인서를 그 채널에 올리면 자동 진위확인됩니다.\n"
+                "`/패널` — [관리자] 패널 메시지를 다시 게시/갱신"
+            ),
+            inline=False,
+        )
+        embed.add_field(
             name="1. 인증",
             value=(
                 "`/인증` — 입원 이력을 등록합니다 (자기 신고)\n"

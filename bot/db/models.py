@@ -121,7 +121,11 @@ class Admission(Base):
     )
 
     user: Mapped["User"] = relationship(back_populates="admissions")
-    hospital: Mapped["Hospital"] = relationship(back_populates="admissions")
+    # 세션이 닫힌 뒤에도 adm.hospital.name 을 안전하게 쓸 수 있도록 즉시 로딩한다.
+    # (async SQLAlchemy 에서 지연 로딩은 DetachedInstanceError/MissingGreenlet 을 유발)
+    hospital: Mapped["Hospital"] = relationship(
+        back_populates="admissions", lazy="selectin"
+    )
 
     # --- 도메인 헬퍼 ---
 

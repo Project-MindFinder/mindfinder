@@ -51,6 +51,6 @@ htmlcov/
 Thumbs.db
 
 # 임시 조사/디버그 산출물 (밑줄 접두사)
-_*.py
-_*.html
-_*.txt
+/_*.py
+/_*.html
+/_*.txt
