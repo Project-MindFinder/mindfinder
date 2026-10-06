@@ -15,7 +15,7 @@ from discord.ext import commands
 
 from bot.config import Settings
 from bot.db.database import Database
-from bot.db.seed import seed_all
+from bot.db.seed import reset_verifications, seed_all
 from bot.db.repositories import (
     AdmissionRepository,
     AuditRepository,
@@ -104,6 +104,14 @@ class MindFinderBot(commands.Bot):
         """봇 로그인 직후 실행. DB 연결, 시드, 코그 로드."""
         await self.db.connect()
         await seed_all(self.db)
+        # [테스트용] 인증정보 전면 초기화 (RESET_VERIFICATIONS_ON_START=true 일 때).
+        # 운영에서는 반드시 false 로 두어야 한다.
+        if self.settings.reset_verifications_on_start:
+            removed = await reset_verifications(self.db)
+            logger.warning(
+                "인증정보 전면 초기화 실행(RESET_VERIFICATIONS_ON_START=true): %s",
+                {k: v for k, v in removed.items() if v},
+            )
         await self._load_cogs()
         await self._sync_commands()
         # 설정된 서버(GUILD_ID)에서만 동작한다.

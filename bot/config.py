@@ -82,6 +82,9 @@ class Settings:
     hospital_category_id: int | None = None
     # 용도별 채널/카테고리를 없으면 자동 생성할지 여부
     auto_create_channels: bool = True
+    # 봇 시작 시 인증 관련 데이터를 전면 초기화할지 여부.
+    # (테스트용. 운영에서는 반드시 false 로 두세요.)
+    reset_verifications_on_start: bool = True
     # 병원별로 별도 채널(및 역할)을 만들지 여부
     per_hospital_channels: bool = True
     # 서류 인증이 없는 사용자도 매칭(동료 찾기)을 쓸 수 있게 할지 (기본 false)
@@ -169,6 +172,9 @@ def load_settings(env_file: str | os.PathLike[str] | None = None) -> Settings:
         doc_verified_role_id=_get_int("DOC_VERIFIED_ROLE_ID"),
         hospital_category_id=_get_int("HOSPITAL_CATEGORY_ID"),
         auto_create_channels=_get_bool("AUTO_CREATE_CHANNELS", True),
+        reset_verifications_on_start=_get_bool(
+            "RESET_VERIFICATIONS_ON_START", True
+        ),
         per_hospital_channels=_get_bool("PER_HOSPITAL_CHANNELS", True),
         allow_unverified_matching=_get_bool("ALLOW_UNVERIFIED_MATCHING", False),
         privacy_policy_version=(
