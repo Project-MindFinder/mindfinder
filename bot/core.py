@@ -21,6 +21,7 @@ from bot.db.repositories import (
     AuditRepository,
     ConsentRepository,
     HospitalRepository,
+    HospitalRequestRepository,
     KnowledgeVerificationRepository,
     ManagedChannelRepository,
     ManagedRoleRepository,
@@ -35,6 +36,7 @@ from bot.services.channels import ChannelService
 from bot.services.consent import ConsentService
 from bot.services.knowledge import KnowledgeService
 from bot.services.matching import MatchingService
+from bot.services.terms import TermsService
 from bot.services.verification import VerificationService
 
 logger = logging.getLogger(__name__)
@@ -80,6 +82,8 @@ class MindFinderBot(commands.Bot):
         self.knowledge = KnowledgeVerificationRepository(self.db)
         # 약관/개인정보 동의
         self.consents = ConsentRepository(self.db)
+        # 사용자 '병원 추가' 요청
+        self.hospital_requests = HospitalRequestRepository(self.db)
 
         # 도메인 서비스 (UI 비의존). 슬래시 커맨드와 상시 패널이 공유한다.
         self.verification_service = VerificationService(self)
@@ -88,6 +92,7 @@ class MindFinderBot(commands.Bot):
         self.knowledge_service = KnowledgeService(self)
         self.channel_service = ChannelService(self)
         self.consent_service = ConsentService(self)
+        self.terms_service = TermsService(self)
 
     async def setup_hook(self) -> None:
         """봇 로그인 직후 실행. DB 연결, 시드, 코그 로드."""

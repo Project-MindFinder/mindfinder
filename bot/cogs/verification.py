@@ -657,6 +657,10 @@ class VerificationCog(commands.Cog):
                 await self.bot.channel_service.ensure_hospital_channel(
                     guild, hospital.id, hospital.name
                 )
+                # 입원 기간(월)에 맞는 비공개 기간 스레드에 초대한다.
+                await self.bot.channel_service.ensure_community_access(
+                    guild, user_id
+                )
             except Exception:  # noqa: BLE001
                 logger.exception("병원 역할/채널 처리 실패: hospital=%s", hospital.id)
 

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 
@@ -102,8 +103,42 @@ def validate_period(
     return Period(start_year, start_month, end_year, end_month, False)
 
 
-def format_ym(ym_value: int) -> str:
-    """연·월 정수를 사람이 읽는 문자열로 변환한다."""
+def format_ym(ym_value: int | None) -> str:
+    """연·월 정수를 사람이 읽는 문자열로 변환한다.
+
+    ``None`` (현재 입원 중, 끝 없음) 이면 "현재" 를 반환한다.
+    """
+    if ym_value is None:
+        return "현재"
     year = ym_value // 12
     month = ym_value % 12 + 1
     return f"{year}년 {month}월"
+
+
+# "2020-03", "2020년 3월", "2020.03" 등에서 (연, 월) 을 찾는다.
+_YM_TOKEN_RE = re.compile(r"(\d{4})\s*[-./년]\s*(\d{1,2})")
+
+
+def parse_period_input(text: str) -> tuple[int, int, int | None, int | None]:
+    """'2020-03 ~ 2020-06' 같은 문자열에서 입퇴원 연·월을 파싱한다.
+
+    반환: (입원연도, 입원월, 퇴원연도, 퇴원월)
+    종료 연·월이 없으면 (…, None, None) → 현재 입원 중으로 간주한다.
+
+    Raises:
+        PeriodError: 기간 문자열을 해석할 수 없을 때.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        raise PeriodError("입원 기간을 입력해주세요. (예: 2020-03 ~ 2020-06)")
+    matches = _YM_TOKEN_RE.findall(raw)
+    if not matches:
+        raise PeriodError(
+            "입원 기간 형식이 올바르지 않습니다. (예: 2020-03 ~ 2020-06)"
+        )
+    start_year, start_month = int(matches[0][0]), int(matches[0][1])
+    if len(matches) >= 2:
+        end_year, end_month = int(matches[1][0]), int(matches[1][1])
+    else:
+        end_year, end_month = None, None
+    return start_year, start_month, end_year, end_month

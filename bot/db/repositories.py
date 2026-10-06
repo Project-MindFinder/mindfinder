@@ -19,6 +19,7 @@ from bot.db.models import (
     ConsentRecord,
     Hospital,
     HospitalAlias,
+    HospitalRequest,
     KnowledgeVerification,
     ManagedChannel,
     ManagedRole,
@@ -909,3 +910,55 @@ class ConsentRepository:
                 .order_by(ConsentRecord.agreed_at.desc())
             )
             return result.scalars().all()
+
+
+class HospitalRequestRepository:
+    """hospital_requests 테이블 접근 (사용자 '병원 추가' 요청)."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def create(
+        self,
+        *,
+        user_id: int,
+        name: str,
+        ward: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> int:
+        async with self.db.session() as session:
+            row = HospitalRequest(
+                user_id=user_id, name=name, ward=ward, reason=reason
+            )
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return row.id
+
+    async def get_by_id(self, request_id: int) -> Optional[HospitalRequest]:
+        async with self.db.session() as session:
+            return await session.get(HospitalRequest, request_id)
+
+    async def list_by_status(self, status: str) -> Sequence[HospitalRequest]:
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(HospitalRequest)
+                .where(HospitalRequest.status == status)
+                .order_by(HospitalRequest.created_at.asc())
+            )
+            return list(result.scalars().all())
+
+    async def set_status(
+        self, request_id: int, status: str, *, reviewer_id: Optional[int] = None
+    ) -> None:
+        async with self.db.session() as session:
+            await session.execute(
+                update(HospitalRequest)
+                .where(HospitalRequest.id == request_id)
+                .values(
+                    status=status,
+                    reviewer_id=reviewer_id,
+                    resolved_at=_utcnow(),
+                )
+            )
+            await session.commit()

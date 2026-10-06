@@ -25,6 +25,8 @@ from typing import TYPE_CHECKING, Optional, Sequence
 
 import discord
 
+from bot.utils.periods import current_ym, format_ym
+
 if TYPE_CHECKING:  # 순환 임포트 방지를 위해 타입 검사 시에만 임포트한다.
     from bot.core import MindFinderBot
 
@@ -47,10 +49,19 @@ COMMUNITY_CHANNEL_KEY = "ch:community"
 COMMUNITY_CHANNEL_NAME = "💬-전체-커뮤니티"
 NOTICE_CHANNEL_KEY = "ch:notice"
 NOTICE_CHANNEL_NAME = "📢-공지"
+# 약관·개인정보 전문 게시 채널 (1단계 이상이면 열람 가능)
+TERMS_CHANNEL_KEY = "ch:terms"
+TERMS_CHANNEL_NAME = "📜-약관-개인정보"
 MATCH_CATEGORY_KEY = "cat:match"
 MATCH_CATEGORY_NAME = "매칭"
 MATCH_CHANNEL_KEY = "ch:match"
 MATCH_CHANNEL_NAME = "🧩-매칭"
+
+# 관리자 전용 (병원 추가 요청 심사 등)
+ADMIN_CATEGORY_KEY = "cat:admin"
+ADMIN_CATEGORY_NAME = "관리자"
+ADMIN_CHANNEL_KEY = "ch:admin"
+ADMIN_CHANNEL_NAME = "🛡️-관리자"
 
 _MAX_NAME = 100
 
@@ -239,8 +250,14 @@ class ChannelService:
         hospital_id: int,
         hospital_name: str,
         period_text: str,
+        *,
+        private: bool = True,
     ) -> Optional[discord.Thread]:
-        """병원 채널 안에 기간 단위 공개 스레드를 만든다."""
+        """병원 채널 안에 기간 단위 스레드를 만든다.
+
+        ``private=True`` (기본) 이면 **비공개 스레드**로 만들어, 초대된
+        (해당 기간에 입원했던) 인원만 볼 수 있다. 이미 있으면 재사용한다.
+        """
         channel = await self.ensure_hospital_channel(
             guild, hospital_id, hospital_name
         )
@@ -250,10 +267,15 @@ class ChannelService:
         for thread in channel.threads:
             if thread.name == thread_name:
                 return thread
+        thread_type = (
+            discord.ChannelType.private_thread
+            if private
+            else discord.ChannelType.public_thread
+        )
         try:
             thread = await channel.create_thread(
                 name=thread_name,
-                type=discord.ChannelType.public_thread,
+                type=thread_type,
                 reason="MindFinder 기간 커뮤니티",
             )
             await thread.send(
@@ -264,6 +286,61 @@ class ChannelService:
         except (discord.Forbidden, discord.HTTPException):
             logger.exception("기간 스레드 생성 실패: hospital=%s", hospital_id)
             return None
+
+    # ---------- 커뮤니티 접근 동기화 ----------
+
+    @staticmethod
+    def months_for_admission(admission) -> list[int]:
+        """입원 이력이 걸치는 '월' 목록 (admit_ym ~ discharge_ym, 양끝 포함)."""
+        start = admission.admit_ym
+        end = admission.discharge_ym
+        if end is None:
+            end = current_ym()
+        if end < start:
+            end = start
+        return list(range(start, end + 1))
+
+    async def add_member_to_thread(
+        self, thread: Optional[discord.Thread], member: discord.Member
+    ) -> None:
+        """비공개 스레드에 멤버를 추가한다 (이미 참여 중이면 무시)."""
+        if thread is None or member is None:
+            return
+        try:
+            await thread.add_user(member)
+        except discord.HTTPException:
+            logger.debug(
+                "스레드 참여 추가 실패: thread=%s", getattr(thread, "id", None)
+            )
+
+    async def ensure_community_access(
+        self, guild: discord.Guild, user_id: int
+    ) -> None:
+        """인증 사용자를 자신의 이력(병원·기간)에 맞는 비공개 스레드에 초대한다.
+
+        - 서류/지식 인증을 받은 병원마다
+        - 입원 기간에 걸치는 '월 단위' 비공개 스레드를 확보하고
+        - 사용자를 그 스레드에 추가한다.
+        """
+        member = guild.get_member(user_id)
+        if member is None:
+            return
+        admissions = await self.bot.admissions.list_by_user(user_id)
+        if not admissions:
+            return
+        verified_ids = set(await self.bot.access.verified_hospital_ids(user_id))
+        for adm in admissions:
+            if adm.hospital_id not in verified_ids:
+                continue
+            for ym_value in self.months_for_admission(adm):
+                thread = await self.ensure_period_thread(
+                    guild,
+                    adm.hospital_id,
+                    adm.hospital.name,
+                    format_ym(ym_value),
+                    private=True,
+                )
+                await self.add_member_to_thread(thread, member)
 
     # ---------- 전체 구성 ----------
 
@@ -311,6 +388,18 @@ class ChannelService:
         await self._ensure_text(
             guild, NOTICE_CHANNEL_KEY, NOTICE_CHANNEL_NAME, community_cat, notice_ow
         )
+        # 약관·개인정보 전문 게시 채널 (1단계 이상 열람, 관리자만 작성)
+        terms_ow = self._overwrites(
+            guild, public=False, view_roles=[tier1_role, tier2_role]
+        )
+        for role in (tier1_role, tier2_role):
+            if role is not None:
+                terms_ow[role] = discord.PermissionOverwrite(
+                    view_channel=True, send_messages=False, read_message_history=True
+                )
+        await self._ensure_text(
+            guild, TERMS_CHANNEL_KEY, TERMS_CHANNEL_NAME, community_cat, terms_ow
+        )
 
         # 3) 매칭 카테고리 (2단계 이상)
         match_cat = await self._ensure_category(
@@ -321,7 +410,16 @@ class ChannelService:
             guild, MATCH_CHANNEL_KEY, MATCH_CHANNEL_NAME, match_cat, match_ow
         )
 
-        # 4) 병원별 채널
+        # 4) 관리자 카테고리/채널 (관리자 역할만 접근)
+        admin_cat = await self._ensure_category(
+            guild, ADMIN_CATEGORY_KEY, ADMIN_CATEGORY_NAME
+        )
+        admin_ow = self._overwrites(guild, public=False)
+        await self._ensure_text(
+            guild, ADMIN_CHANNEL_KEY, ADMIN_CHANNEL_NAME, admin_cat, admin_ow
+        )
+
+        # 5) 병원별 채널
         if settings.per_hospital_channels:
             for hospital in await self.bot.hospitals.list_all():
                 await self.ensure_hospital_channel(guild, hospital.id, hospital.name)

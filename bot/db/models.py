@@ -453,3 +453,35 @@ class ConsentRecord(Base):
     agreed_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
     )
+
+
+class HospitalRequest(Base):
+    """사용자가 직접 입력한 '병원 추가' 요청 (관리자 승인 후 목록에 반영).
+
+    기본 목록에는 서울대학교병원(62병동)·서울대학교어린이병원(7A병동)만 두고,
+    그 외 병원은 사용자가 직접 입력해 요청하면 관리자가 검토 후 승인한다.
+
+    status: 'pending' | 'approved' | 'rejected'
+    """
+
+    __tablename__ = "hospital_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected')",
+            name="ck_hospital_request_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    ward: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20), default="pending", nullable=False, index=True
+    )
+    reviewer_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

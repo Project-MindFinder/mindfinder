@@ -1,4 +1,4 @@
-@echo off
+을@echo off
 REM ============================================
 REM MindFinder SQLite DB 백업 스크립트 (Windows)
 REM backups 폴더에 날짜/시간별 백업본을 생성합니다.

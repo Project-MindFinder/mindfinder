@@ -24,9 +24,11 @@ logger = logging.getLogger(__name__)
 # 자동 진위확인에 허용할 PDF 최대 크기 (10MB)
 MAX_PDF_BYTES = 10 * 1024 * 1024
 # 진위확인 자동 검증을 지원하는 병원 키
-TRUTH_SUPPORTED_HOSPITALS = {"snuh"}
+# snuh: 서울대학교병원(62병동), snuh_child: 서울대학교어린이병원(7A병동)
+TRUTH_SUPPORTED_HOSPITALS = {"snuh", "snuh_child"}
 # 자동 진위확인을 지원하는 대표 병원명 (그 외 병원은 관리자 수동 심사)
-AUTO_VERIFY_HOSPITAL_NAMES = {"서울대학교병원"}
+# 서울대학교병원과 서울대학교어린이병원은 서로 다른 병동이지만 동일한 진위확인 API 를 쓴다.
+AUTO_VERIFY_HOSPITAL_NAMES = {"서울대학교병원", "서울대학교어린이병원"}
 
 # 인증 상태 표시
 VERIFICATION_LABEL = {
@@ -208,7 +210,8 @@ class VerificationService:
                 title="지원하지 않는 병원",
                 color="orange",
                 detail=(
-                    "현재 **서울대학교병원** 발급 서류만 자동 진위확인을 지원합니다.\n"
+                    "현재 **서울대학교병원(62병동)·서울대학교어린이병원(7A병동)** "
+                    "발급 서류만 자동 진위확인을 지원합니다.\n"
                     "다른 병원 서류는 관리자 심사를 이용해주세요."
                 ),
             )
@@ -267,9 +270,12 @@ class VerificationService:
             )
         start_year, start_month, end_year, end_month = period
 
+        # 서류에서 판별한 병원(키워드)을 대표 병원으로 정규화한다.
+        # 서울대학교어린이병원(7A병동)과 서울대학교병원(62병동)은 서로 다른 병동이다.
         hospital = await self.resolve_hospital(
             cert.hospital_name or "서울대학교병원"
         )
+        hospital_display = hospital_utils.hospital_display_name(hospital.name)
         await self.bot.user_repo.ensure_user(user_id)
         admission_id = await self.bot.admissions.add(
             user_id=user_id,
@@ -339,7 +345,7 @@ class VerificationService:
             title="자동 인증 완료" if approved else "자동 인증 실패",
             color="green" if approved else "red",
             detail=(
-                f"**병원**: {cert.hospital_name or hospital.name}\n"
+                f"**병원**: {hospital_display}\n"
                 f"**진료과**: {department_summary or '확인 불가'}\n"
                 f"**기간**: {start_year}년 {start_month}월 ~ "
                 f"{end_year}년 {end_month}월\n"
@@ -348,7 +354,7 @@ class VerificationService:
                 f"**진위확인**: {result.message or result.status.value}"
             ),
             document_no=cert.document_no,
-            hospital_name=cert.hospital_name or hospital.name,
+            hospital_name=hospital.name,
             departments=department_summary,
             period_text=(
                 f"{start_year}년 {start_month}월 ~ {end_year}년 {end_month}월"

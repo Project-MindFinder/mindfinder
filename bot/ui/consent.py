@@ -45,11 +45,17 @@ _TERMS_SUMMARY = (
 
 
 def _url_line(bot: "MindFinderBot", doc_type: str) -> str:
-    """문서 공개 URL 이 있으면 마크다운 링크 문구를 만든다."""
+    """문서 전문 링크 문구를 만든다.
+
+    `.env` URL 설정이 없으면 약관 채널에 게시된 메시지 링크를 사용한다.
+    """
     url = bot.consent_service.doc_urls().get(doc_type)
+    terms = getattr(bot, "terms_service", None)
+    if not url and terms is not None:
+        url = terms.doc_urls().get(doc_type)
     if url:
         return f"[전문 보기]({url})"
-    return "전문은 서버 공지 또는 관리자에게 문의하세요."
+    return "전문은 **📜 약관·개인정보** 채널에서 확인하실 수 있습니다."
 
 
 def build_consent_embed(bot: "MindFinderBot") -> discord.Embed:
