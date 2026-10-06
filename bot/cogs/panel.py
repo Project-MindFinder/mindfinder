@@ -2697,6 +2697,13 @@ async def grant_verified_access(
     except Exception:  # noqa: BLE001
         logger.exception("병원 채널 확보 실패: hospital=%s", hospital.id)
 
+    # 인증이 끝나면 **자동으로** 내 입원 기간에 맞는 비공개 스레드를 열고 초대한다.
+    # (같은 기간에 입원했던 인증자에게만 그 방이 보인다.)
+    try:
+        await bot.channel_service.ensure_community_access(guild, user_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("인증 후 기간 스레드 자동 생성 실패: user=%s", user_id)
+
 
 # --------------------------------------------------------------------------- #
 # 코그: 패널 게시 및 패널 채널 PDF 자동 진위확인
