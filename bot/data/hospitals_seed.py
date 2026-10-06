@@ -45,15 +45,15 @@ async def seed_hospitals(db: Database) -> None:
             if existing is None:
                 await repo.add_alias(hospital.id, alias_norm)
 
-    # 기본 목록 외 병원 정리 (입원 이력이 없을 때만)
+    # 기본 목록(7A병동) 외 병원은 모두 정리한다 (관련 이력도 함께 삭제).
     for hospital in await repo.list_all():
         if resolve_canonical(hospital.name) in default_canonicals:
             continue
         count = await admissions.count_by_hospital(hospital.id)
         if count:
+            await admissions.delete_by_hospital(hospital.id)
             logger.info(
-                "기본 목록 외 병원 유지(이력 %d건): %s", count, hospital.name
+                "기본 목록 외 병원 이력 삭제(%d건): %s", count, hospital.name
             )
-            continue
         await repo.delete(hospital.id)
         logger.info("기본 목록 외 병원 삭제: %s", hospital.name)

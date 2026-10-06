@@ -204,15 +204,16 @@ class PeriodPickerView(discord.ui.View):
         self.start_month = discord.ui.Select(
             placeholder="입원 월", options=_month_options()
         )
+        # 퇴원은 '입원 중'일 수 있으므로 선택 안 해도 되게 한다 (min_values=0).
         self.end_year = discord.ui.Select(
             placeholder="퇴원 연도 (입원 중이면 비워두세요)",
             options=_year_options(),
-            required=False,
+            min_values=0,
         )
         self.end_month = discord.ui.Select(
             placeholder="퇴원 월 (입원 중이면 비워두세요)",
             options=_month_options(),
-            required=False,
+            min_values=0,
         )
         for item in (self.start_year, self.start_month, self.end_year, self.end_month):
             self.add_item(item)

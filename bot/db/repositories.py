@@ -190,6 +190,18 @@ class AdmissionRepository:
             )
             return int(result.scalar_one())
 
+    async def delete_by_hospital(self, hospital_id: int) -> int:
+        """특정 병원의 입원 이력을 모두 삭제한다 (병원 정리 시).
+
+        Returns: 삭제한 행 수.
+        """
+        async with self.db.session() as session:
+            result = await session.execute(
+                delete(Admission).where(Admission.hospital_id == hospital_id)
+            )
+            await session.commit()
+            return result.rowcount or 0
+
     async def get_by_id(self, admission_id: int) -> Optional[Admission]:
         async with self.db.session() as session:
             return await session.get(Admission, admission_id)
