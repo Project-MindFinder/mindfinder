@@ -3206,28 +3206,22 @@ class PanelCog(commands.Cog):
     def _items_signature(items) -> str:  # noqa: ANN001
         """뷰 구성요소(버튼/셀렉트)를 비교 가능한 문자열로 만든다.
 
-        셀렉트(드롭다운)는 **options/placeholder** 까지 포함해야 항목이
-        바뀐 것을 감지해 패널을 갱신할 수 있다.
+        주의: **기존 메시지의 컴포넌트**(디스코드 API 응답)와 **뷰 children**
+        (로컬 객체)은 서로 다른 타입이라, 양쪽에 공통으로 안정적으로 존재하는
+        값(custom_id / label)만 쓴다.
+        (placeholder/options/style/disabled 는 API 응답 표현이 달라
+         변경이 없어도 '변경됨'으로 오판할 수 있으므로 제외한다.)
         """
         parts: list[str] = []
         for item in items:
-            chunk = [
-                str(getattr(item, "custom_id", "") or ""),
-                str(getattr(item, "label", "") or ""),
-                str(getattr(item, "style", "") or ""),
-                str(getattr(item, "disabled", "") or ""),
-                str(getattr(item, "placeholder", "") or ""),
-            ]
-            # 드롭다운(Select) 항목은 옵션 구성도 서명에 포함한다.
-            options = getattr(item, "options", None)
-            if options:
-                chunk.append(
-                    "|".join(
-                        f"{getattr(o, 'label', '')}:{getattr(o, 'value', '')}"
-                        for o in options
-                    )
+            parts.append(
+                "\x1f".join(
+                    [
+                        str(getattr(item, "custom_id", "") or ""),
+                        str(getattr(item, "label", "") or ""),
+                    ]
                 )
-            parts.append("\x1f".join(chunk))
+            )
         return "\x1e".join(parts)
 
     @staticmethod

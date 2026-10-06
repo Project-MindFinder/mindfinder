@@ -66,16 +66,24 @@ class FakeTextChannel:
         self.id = channel_id
         self.name = name
         self.category = category
-        self.overwrites = None
+        self.overwrites: dict = {}
         self.threads: list = []
 
     async def edit(self, **kwargs) -> None:  # noqa: ANN003
+        # 실제 discord 와 달리 대역은 전달된 overwrites 로 통째로 교체한다.
         if "overwrites" in kwargs:
-            self.overwrites = kwargs["overwrites"]
+            self.overwrites = dict(kwargs["overwrites"])
         if "name" in kwargs:
             self.name = kwargs["name"]
         if "category" in kwargs:
             self.category = kwargs["category"]
+
+    async def set_permissions(self, target, *, overwrite=None, reason=None, **kwargs) -> None:  # noqa: ANN001, ANN003
+        """개별 대상 권한만 추가/변경한다 (기존 권한 유지)."""
+        if overwrite is not None:
+            self.overwrites[target] = overwrite
+        elif kwargs:
+            self.overwrites[target] = kwargs
 
     async def delete(self, reason=None) -> None:  # noqa: ANN001
         self.deleted = True

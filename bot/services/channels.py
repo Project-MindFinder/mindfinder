@@ -326,6 +326,10 @@ class ChannelService:
         - ``members`` 가 주어지면 그 사용자들에게 **개별 오버라이트**로 접근을 준다.
           (역할 태그를 선택하지 않아도 채널은 보인다 — 인증만 하면 열림)
         - ``with_role`` 이면 병원 역할을 가진 사람도 볼 수 있게 한다(선택한 경우).
+
+        주의: 기존 채널이 있으면 **오버라이트를 통째로 교체하지 않는다.**
+        (다른 인증자의 개별 권한이 사라지기 때문) 기본 권한만 동기화하고,
+        멤버 개별 권한은 ``set_permissions`` 로 **추가**한다.
         """
         category = await self.ensure_hospital_category(
             guild, hospital_id, hospital_name, with_role=with_role
@@ -339,21 +343,47 @@ class ChannelService:
         overwrites = self._hospital_overwrites(guild, hospital_role)
         if tier2_role is not None:
             overwrites[tier2_role] = discord.PermissionOverwrite(view_channel=False)
-        # 인증한 사용자 개개인에게 접근 권한을 부여한다 (역할 태그와 무관).
-        for member in members or ():
-            if member is not None:
-                overwrites[member] = discord.PermissionOverwrite(
-                    view_channel=True,
-                    send_messages=True,
-                    read_message_history=True,
-                )
-        return await self._ensure_text(
+        key = self.period_channel_key(hospital_id, ym_value)
+        # sync_permissions=False 로 두어 **기존 오버라이트를 통째로 교체하지 않는다.**
+        # (다른 인증자의 개별 권한이 사라지는 것을 막는다.)
+        channel = await self._ensure_text(
             guild,
-            self.period_channel_key(hospital_id, ym_value),
+            key,
             self.period_channel_name(ym_value),
             category,
             overwrites,
+            sync_permissions=False,
         )
+        if channel is None:
+            return None
+        # 필요한 권한만 **개별 추가**한다 (set_permissions 는 해당 대상만 변경).
+        for target, ow in overwrites.items():
+            try:
+                await channel.set_permissions(target, overwrite=ow, reason="MindFinder 기간 채널 권한")
+            except (discord.Forbidden, discord.HTTPException):
+                logger.debug(
+                    "기간 채널 기본 권한 설정 실패: channel=%s",
+                    getattr(channel, "id", None),
+                )
+        # 인증한 사용자 개개인에게 접근 권한을 **추가**한다 (기존 권한 유지).
+        for member in members or ():
+            if member is None:
+                continue
+            try:
+                await channel.set_permissions(
+                    member,
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                    reason="MindFinder 기간 채널 접근 부여",
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                logger.debug(
+                    "기간 채널 개별 권한 부여 실패: channel=%s user=%s",
+                    getattr(channel, "id", None),
+                    getattr(member, "id", None),
+                )
+        return channel
 
     async def ensure_hospital_channel(
         self,
