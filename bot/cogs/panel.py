@@ -1552,6 +1552,59 @@ class HelpPanelView(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(
+        label="내 이용 현황", style=discord.ButtonStyle.success,
+        custom_id="mf:h_status", row=0,
+    )
+    async def my_status(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """내 인증 단계·입원 이력·매칭 상태를 한 번에 보여준다 (실제 조회 기능)."""
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        bot = self.bot
+        tier = await bot.access.user_tier(interaction.user.id)
+        tier_label = {
+            0: "미인증 — 먼저 입원 이력을 등록하세요",
+            1: "1단계 (자기 신고) — 전체 커뮤니티 이용 가능",
+            2: "2단계 (서류·지식 인증) — 병원 커뮤니티·매칭 이용 가능",
+        }.get(tier, f"{tier}단계")
+        embed = discord.Embed(title="🧭 내 이용 현황", color=discord.Color.teal())
+        embed.add_field(name="인증 단계", value=tier_label, inline=False)
+
+        admissions = await bot.admissions.list_by_user(interaction.user.id)
+        if admissions:
+            lines = [
+                f"· #{a.id} {a.hospital.name} · {a.period_text()} "
+                f"— {VERIFICATION_LABEL.get(a.verification, a.verification)}"
+                for a in admissions
+            ]
+            embed.add_field(
+                name="입원 이력", value="\n".join(lines)[:1024], inline=False
+            )
+        else:
+            embed.add_field(
+                name="입원 이력",
+                value="등록된 이력이 없습니다. **🔐 인증** 채널에서 등록하세요.",
+                inline=False,
+            )
+
+        pref = await bot.match_prefs.is_enabled(interaction.user.id)
+        can_match = await bot.access.can_match(interaction.user.id)
+        match_lines = [f"희망: {'켜짐' if pref else '꺼짐'}"]
+        match_lines.append("사용 가능" if can_match else "2단계 인증 후 사용 가능")
+        if interaction.guild is not None:
+            try:
+                chans = await bot.matching_service.my_open_channels(
+                    interaction.guild, interaction.user.id
+                )
+            except Exception:  # noqa: BLE001
+                chans = []
+            if chans:
+                match_lines.append("내 채널: " + ", ".join(c.mention for c in chans))
+        embed.add_field(name="매칭", value="\n".join(match_lines)[:1024], inline=False)
+        embed.set_footer(text="각 기능은 해당 채널의 패널 버튼에서 사용하세요.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
 
 # --------------------------------------------------------------------------- #
 # 관리자 패널 (영구 뷰) — 🛠-관리자 채널
@@ -1824,6 +1877,40 @@ class PanelCog(commands.Cog):
                 return ch
         return await self.bot.channel_service.managed_text_channel(guild, key)
 
+    @staticmethod
+    def _embed_signature(embed: discord.Embed) -> str:
+        """임베드 내용을 비교 가능한 문자열로 만든다 (변경 감지용)."""
+        parts = [embed.title or "", embed.description or "", str(embed.color)]
+        for field in embed.fields:
+            parts.append(f"{field.name}\x1f{field.value}\x1f{field.inline}")
+        parts.append(str(getattr(embed.footer, "text", "") or ""))
+        return "\x1e".join(parts)
+
+    @staticmethod
+    def _items_signature(items) -> str:  # noqa: ANN001
+        """뷰 구성요소(버튼/셀렉트)를 비교 가능한 문자열로 만든다."""
+        parts: list[str] = []
+        for item in items:
+            parts.append(
+                "\x1f".join(
+                    [
+                        str(getattr(item, "custom_id", "") or ""),
+                        str(getattr(item, "label", "") or ""),
+                        str(getattr(item, "style", "") or ""),
+                        str(getattr(item, "disabled", "") or ""),
+                    ]
+                )
+            )
+        return "\x1e".join(parts)
+
+    @staticmethod
+    def _message_items(message: discord.Message) -> list:
+        """기존 메시지의 구성요소(버튼/셀렉트)를 평탄화해 반환한다."""
+        items: list = []
+        for row in message.components:
+            items.extend(getattr(row, "children", []))
+        return items
+
     async def _post_panel(
         self,
         channel: discord.TextChannel,
@@ -1831,8 +1918,12 @@ class PanelCog(commands.Cog):
         embed: discord.Embed,
         view: discord.ui.View,
     ) -> None:
-        """채널에 패널 메시지를 게시하거나 기존 메시지를 갱신한다."""
-        existing: Optional[discord.Message] = None
+        """채널에 패널 메시지를 게시한다.
+
+        내용이 이전과 같으면 그대로 두고, **변경사항이 있으면 기존 고정
+        메시지를 지우고 새로 만들어 다시 고정**한다. (중복 패널도 정리)
+        """
+        matches: list[discord.Message] = []
         try:
             async for msg in channel.history(limit=50):
                 if (
@@ -1841,17 +1932,37 @@ class PanelCog(commands.Cog):
                     and msg.embeds[0].footer
                     and msg.embeds[0].footer.text == marker
                 ):
-                    existing = msg
-                    break
+                    matches.append(msg)
         except discord.HTTPException:
             logger.exception("패널 메시지 조회 실패: channel=%s", channel.id)
+
+        unchanged = bool(matches) and (
+            self._embed_signature(matches[0].embeds[0]) == self._embed_signature(embed)
+            and self._items_signature(self._message_items(matches[0]))
+            == self._items_signature(view.children)
+        )
+        if unchanged:
+            # 내용이 같으면 유지하고, 혹시 남은 중복 패널만 정리한다.
+            for extra in matches[1:]:
+                try:
+                    await extra.delete()
+                except discord.HTTPException:
+                    logger.exception("중복 패널 삭제 실패: channel=%s", channel.id)
+            return
+
+        # 변경사항이 있으면 기존 패널(고정 포함)을 지우고 새로 만든다.
+        for msg in matches:
+            try:
+                await msg.delete()
+            except discord.HTTPException:
+                logger.exception("패널 삭제 실패: channel=%s", channel.id)
         try:
-            if existing is not None:
-                await existing.edit(embed=embed, view=view)
-                logger.info("패널 갱신: channel=%s marker=%s", channel.id, marker)
-            else:
-                await channel.send(embed=embed, view=view)
-                logger.info("패널 게시: channel=%s marker=%s", channel.id, marker)
+            sent = await channel.send(embed=embed, view=view)
+            logger.info("패널 게시: channel=%s marker=%s", channel.id, marker)
+            try:
+                await sent.pin(reason="MindFinder 상시 패널 고정")
+            except discord.HTTPException:
+                logger.exception("패널 고정 실패: channel=%s", channel.id)
         except discord.HTTPException:
             logger.exception("패널 전송 실패: channel=%s", channel.id)
 
@@ -1945,6 +2056,14 @@ class PanelCog(commands.Cog):
                 "🧩 **매칭** — 동료 찾기 (서류 인증자)\n"
                 "💬 **전체 커뮤니티** — 인증자 커뮤니티\n"
                 "🏥 **병원-커뮤니티** — 병원·기간별"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="내 이용 현황",
+            value=(
+                "아래 **‘내 이용 현황’** 버튼으로 내 **인증 단계·입원 이력·"
+                "매칭 상태·매칭 채널**을 한 번에 확인할 수 있습니다."
             ),
             inline=False,
         )
