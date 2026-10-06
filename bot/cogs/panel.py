@@ -1637,11 +1637,9 @@ class VerifyPanelView(discord.ui.View):
             )
             return
         handler = {
-            "admission": self._do_admission,
             "verify": self._do_verify,
             "other": self._do_other,
             "request": self._do_request,
-            "history": self._do_history,
         }.get(values[0])
         if handler is None:
             await interaction.response.send_message(
@@ -1649,21 +1647,6 @@ class VerifyPanelView(discord.ui.View):
             )
             return
         await handler(interaction)
-
-    async def _do_admission(self, interaction: discord.Interaction) -> None:
-        async def _proceed(inner: discord.Interaction) -> None:
-            view = await HospitalChooseView(
-                self.bot, self.vservice, "admission"
-            ).load()
-            await inner.response.send_message(
-                "입원 이력을 등록할 **병원을 선택**하세요.",
-                view=view,
-                ephemeral=True,
-            )
-
-        if not await ensure_consent(self.bot, interaction, _proceed):
-            return
-        await _proceed(interaction)
 
     async def _do_verify(self, interaction: discord.Interaction) -> None:
         async def _proceed(inner: discord.Interaction) -> None:
@@ -1748,45 +1731,6 @@ class VerifyPanelView(discord.ui.View):
             ephemeral=True,
         )
 
-    async def _do_kstatus(self, interaction: discord.Interaction) -> None:
-        """내가 받은 질문(답변)과 내가 보낸 질문(판정)을 한 번에 보여준다."""
-        to_answer = await self.bot.knowledge_service.list_for_respondent(
-            interaction.user.id, "awaiting_answer"
-        )
-        to_verdict = await self.bot.knowledge_service.list_for_respondent(
-            interaction.user.id, "awaiting_verdict"
-        )
-        embed = discord.Embed(
-            title="🧠 지식기반 인증 현황", color=discord.Color.blurple()
-        )
-        if to_answer:
-            embed.add_field(
-                name=f"답변할 질문 ({len(to_answer)}건)",
-                value="\n".join(f"#{r.id} · {r.period_text}" for r in to_answer[:5]),
-                inline=False,
-            )
-        if to_verdict:
-            embed.add_field(
-                name=f"판정할 질문 ({len(to_verdict)}건)",
-                value="\n".join(f"#{r.id} · {r.period_text}" for r in to_verdict[:5]),
-                inline=False,
-            )
-        if not to_answer and not to_verdict:
-            embed.description = "진행 중인 지식기반 인증이 없습니다."
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        if to_answer:
-            await interaction.followup.send(
-                "받은 질문에 답변하세요.",
-                view=AnswerRequestView(self.bot, to_answer[0].id),
-                ephemeral=True,
-            )
-        if to_verdict:
-            await interaction.followup.send(
-                "보낸 질문의 응답을 판정하세요.",
-                view=VerdictView(self.bot, to_verdict[0].id),
-                ephemeral=True,
-            )
-
     async def _do_request(self, interaction: discord.Interaction) -> None:
         """목록에 없는 병원을 직접 입력해 등록을 요청한다 (관리자 승인 후 추가)."""
 
@@ -1796,27 +1740,6 @@ class VerifyPanelView(discord.ui.View):
         if not await ensure_consent(self.bot, interaction, _proceed):
             return
         await _proceed(interaction)
-
-    async def _do_history(self, interaction: discord.Interaction) -> None:
-        rows = await self.bot.admissions.list_by_user(interaction.user.id)
-        if not rows:
-            await interaction.response.send_message(
-                "아직 등록된 이력이 없습니다. '입원 이력 등록' 버튼을 눌러주세요.",
-                ephemeral=True,
-            )
-            return
-        embed = discord.Embed(title="📋 내 입원 이력", color=discord.Color.blue())
-        for adm in rows:
-            embed.add_field(
-                name=f"#{adm.id} · {adm.hospital.name}",
-                value=(
-                    f"{adm.period_text()}\n"
-                    f"상태: {VERIFICATION_LABEL.get(adm.verification, adm.verification)}"
-                ),
-                inline=False,
-            )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
 
 # --------------------------------------------------------------------------- #
 # 매칭 패널 (영구 뷰) — 🧩-매칭 채널
