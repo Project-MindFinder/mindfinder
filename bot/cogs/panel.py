@@ -2832,10 +2832,11 @@ class PanelCog(commands.Cog):
         embed: discord.Embed,
         view: discord.ui.View,
     ) -> None:
-        """채널에 패널 메시지를 게시한다.
+        """채널에 패널 메시지를 게시/갱신한다.
 
-        내용이 이전과 같으면 그대로 두고, **변경사항이 있으면 기존 고정
-        메시지를 지우고 새로 만들어 다시 고정**한다. (중복 패널도 정리)
+        기존 패널 메시지는 **지우지 않고 내용만 수정(edit)** 한다.
+        (삭제·재고정을 반복하지 않기 위함) 중복 패널만 정리하고,
+        패널이 없으면 새로 게시한다.
         """
         matches: list[discord.Message] = []
         try:
@@ -2850,33 +2851,35 @@ class PanelCog(commands.Cog):
         except discord.HTTPException:
             logger.exception("패널 메시지 조회 실패: channel=%s", channel.id)
 
-        unchanged = bool(matches) and (
-            self._embed_signature(matches[0].embeds[0]) == self._embed_signature(embed)
-            and self._items_signature(self._message_items(matches[0]))
-            == self._items_signature(view.children)
-        )
-        if unchanged:
-            # 내용이 같으면 유지하고, 혹시 남은 중복 패널만 정리한다.
+        if matches:
+            first = matches[0]
+            unchanged = (
+                self._embed_signature(first.embeds[0]) == self._embed_signature(embed)
+                and self._items_signature(self._message_items(first))
+                == self._items_signature(view.children)
+            )
+            if not unchanged:
+                try:
+                    await first.edit(embed=embed, view=view)
+                    logger.info("패널 갱신: channel=%s marker=%s", channel.id, marker)
+                except discord.HTTPException:
+                    logger.exception("패널 수정 실패: channel=%s", channel.id)
+            # 남은 중복 패널만 정리한다.
             for extra in matches[1:]:
                 try:
                     await extra.delete()
                 except discord.HTTPException:
-                    logger.exception("중복 패널 삭제 실패: channel=%s", channel.id)
+                    logger.debug("중복 패널 삭제 실패: channel=%s", channel.id)
             return
 
-        # 변경사항이 있으면 기존 패널(고정 포함)을 지우고 새로 만든다.
-        for msg in matches:
-            try:
-                await msg.delete()
-            except discord.HTTPException:
-                logger.exception("패널 삭제 실패: channel=%s", channel.id)
+        # 패널이 없으면 새로 게시하고 고정한다.
         try:
             sent = await channel.send(embed=embed, view=view)
             logger.info("패널 게시: channel=%s marker=%s", channel.id, marker)
             try:
                 await sent.pin(reason="MindFinder 상시 패널 고정")
             except discord.HTTPException:
-                logger.exception("패널 고정 실패: channel=%s", channel.id)
+                logger.debug("패널 고정 실패: channel=%s", channel.id)
         except discord.HTTPException:
             logger.exception("패널 전송 실패: channel=%s", channel.id)
 
