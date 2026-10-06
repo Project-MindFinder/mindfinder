@@ -127,12 +127,12 @@ class TermsService:
             first_url: Optional[str] = None
             chunks = split_text(text)
             for idx, chunk in enumerate(chunks):
-                header = (
-                    f"📜 MindFinder {label}"
+                # 첫 메시지에만 문서 제목을 붙인다 (이어지는 조각은 본문만).
+                content = (
+                    f"**📜 MindFinder {label}**\n{chunk}"
                     if idx == 0
-                    else f"📜 MindFinder {label} (계속 {idx + 1}/{len(chunks)})"
+                    else chunk
                 )
-                content = f"**{header}**\n{chunk}"
                 try:
                     message = await channel.send(content)
                 except discord.HTTPException:
