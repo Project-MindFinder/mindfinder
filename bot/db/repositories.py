@@ -692,6 +692,7 @@ class MatchChannelRepository:
         guild_id: int,
         hospital_id: Optional[int],
         member_ids: Sequence[int],
+        name: Optional[str] = None,
     ) -> int:
         """새 매칭 채널을 등록하고 id 를 반환한다."""
         async with self.db.session() as session:
@@ -699,6 +700,7 @@ class MatchChannelRepository:
                 discord_channel_id=discord_channel_id,
                 guild_id=guild_id,
                 hospital_id=hospital_id,
+                name=name,
             )
             session.add(channel)
             await session.flush()
@@ -800,6 +802,31 @@ class MatchChannelRepository:
                     )
                 )
                 await session.commit()
+
+    async def set_name(self, match_channel_id: int, name: str) -> None:
+        """매칭 채널 이름(예: 매칭-12)을 저장한다."""
+        async with self.db.session() as session:
+            await session.execute(
+                update(MatchChannel)
+                .where(MatchChannel.id == match_channel_id)
+                .values(name=name)
+            )
+            await session.commit()
+
+    async def set_discord_channel(
+        self, match_channel_id: int, discord_channel_id: int, name: Optional[str] = None
+    ) -> None:
+        """매칭 채널의 디스코드 채널 ID/이름을 갱신한다."""
+        async with self.db.session() as session:
+            values: dict = {"discord_channel_id": discord_channel_id}
+            if name is not None:
+                values["name"] = name
+            await session.execute(
+                update(MatchChannel)
+                .where(MatchChannel.id == match_channel_id)
+                .values(**values)
+            )
+            await session.commit()
 
     async def close(self, match_channel_id: int) -> None:
         """채널을 닫힘 상태로 표시한다."""
@@ -938,6 +965,17 @@ class ManagedChannelRepository:
                 row.kind = kind
                 row.discord_id = discord_id
                 row.name = name
+            await session.commit()
+
+    async def delete(self, guild_id: int, key: str) -> None:
+        """논리 키에 해당하는 관리 채널 매핑을 삭제한다 (레거시 정리용)."""
+        async with self.db.session() as session:
+            await session.execute(
+                delete(ManagedChannel).where(
+                    ManagedChannel.guild_id == guild_id,
+                    ManagedChannel.key == key,
+                )
+            )
             await session.commit()
 
 

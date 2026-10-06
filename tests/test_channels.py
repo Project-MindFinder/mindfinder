@@ -2,6 +2,9 @@
 
 디스코드 길드를 최소한의 가짜 객체로 대체하고, 용도별 채널/카테고리/역할이
 의도대로 생성·재사용되는지 검증한다.
+
+새 구조: **카테고리 = 병원**, **카테고리 안의 텍스트 채널 = 기간(월)**.
+기간 채널은 해당 병원 역할을 가진 사람만 볼 수 있다(비공개).
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from bot.db.repositories import (
 from bot.services.access_control import AccessControlService
 from bot.services.channels import (
     COMMUNITY_CHANNEL_NAME,
+    HOSPITAL_CATEGORY_KEY,
     NOTICE_CHANNEL_NAME,
     PANEL_CHANNEL_KEY,
     PANEL_CHANNEL_NAME,
@@ -57,57 +61,45 @@ class FakeMember:
             self.roles.remove(role)
 
 
-class FakeThread:
-    def __init__(self, name: str) -> None:
-        self.id = id(self)
-        self.name = name
-        self.sent: list[str] = []
-        self.members: list[int] = []
-
-    async def send(self, content: str) -> None:
-        self.sent.append(content)
-
-    async def add_user(self, member) -> None:  # noqa: ANN001
-        self.members.append(member.id)
-
-    async def edit(self, **kwargs) -> None:  # noqa: ANN003
-        self.edited = kwargs
-
-
 class FakeTextChannel:
     def __init__(self, channel_id: int, name: str, category=None) -> None:
         self.id = channel_id
         self.name = name
         self.category = category
         self.overwrites = None
-        self.threads: list[FakeThread] = []
+        self.threads: list = []
 
     async def edit(self, **kwargs) -> None:  # noqa: ANN003
-        self.overwrites = kwargs.get("overwrites", self.overwrites)
+        if "overwrites" in kwargs:
+            self.overwrites = kwargs["overwrites"]
+        if "name" in kwargs:
+            self.name = kwargs["name"]
+        if "category" in kwargs:
+            self.category = kwargs["category"]
 
-    async def create_thread(  # noqa: ANN001, ANN003
-        self, name: str, type=None, invitable=True, reason=None
-    ) -> FakeThread:
-        thread = FakeThread(name)
-        thread.type = type
-        self.threads.append(thread)
-        return thread
-
-    async def archived_threads(self, private: bool = False, limit: int = 50):  # noqa: ANN201
-        """보관 스레드 조회 대역 (테스트에서는 비어 있음)."""
-        for _ in ():
-            yield _
+    async def delete(self, reason=None) -> None:  # noqa: ANN001
+        self.deleted = True
 
 
 class FakeCategory:
     def __init__(self, category_id: int, name: str) -> None:
         self.id = category_id
         self.name = name
+        self.overwrites = None
         self.text_channels: list[FakeTextChannel] = []
 
     @property
     def channels(self) -> list[FakeTextChannel]:
         return self.text_channels
+
+    async def edit(self, **kwargs) -> None:  # noqa: ANN003
+        if "overwrites" in kwargs:
+            self.overwrites = kwargs["overwrites"]
+        if "name" in kwargs:
+            self.name = kwargs["name"]
+
+    async def delete(self, reason=None) -> None:  # noqa: ANN001
+        self.deleted = True
 
 
 class FakeGuild:
@@ -145,8 +137,9 @@ class FakeGuild:
     def get_member(self, user_id: int):
         return FakeMember(user_id)
 
-    async def create_category(self, name: str, reason=None) -> FakeCategory:  # noqa: ANN001
+    async def create_category(self, name: str, overwrites=None, reason=None) -> FakeCategory:  # noqa: ANN001
         category = FakeCategory(self._next_id(), name)
+        category.overwrites = overwrites
         self.categories.append(category)
         return category
 
@@ -244,11 +237,11 @@ async def test_ensure_all_is_idempotent(service: ChannelService) -> None:
     assert first == second
 
 
-async def test_ensure_all_creates_hospital_channel_without_role(
+async def test_ensure_all_creates_hospital_category_without_role(
     service: ChannelService, bot: FakeBot
 ) -> None:
-    """병원 채널은 만들되, 역할은 사용자가 선택(opt-in)할 때만 만든다."""
-    # 병동은 DB(ward)에 저장한다. 채널 이름은 병동을 포함해 만든다.
+    """병원 카테고리는 만들되, 역할은 인증(verified) 이력이 있을 때만 만든다."""
+    # 병동은 DB(ward)에 저장한다. 카테고리 이름은 병동을 포함해 만든다.
     hospital = await bot.hospitals.create(
         "서울대학교어린이병원 7A병동",
         "서울대학교어린이병원7a병동",
@@ -257,13 +250,50 @@ async def test_ensure_all_creates_hospital_channel_without_role(
     guild = FakeGuild()
     await service.ensure_all(guild)  # type: ignore[arg-type]
 
-    # 채널 이름에는 병동 정보가 함께 표시된다 (예: 서울대학교어린이병원 7A병동).
+    # 카테고리 이름에는 병동 정보가 함께 표시된다 (예: 서울대학교어린이병원 7A병동).
     assert any(
-        c.name == f"🏥-{hospital.name}" for c in guild.text_channels
+        c.name == f"🏥-{hospital.name}" for c in guild.categories
     )
-    # 아무도 역할을 선택하지 않았으므로 병원 역할은 생성되지 않는다.
+    # 아무도 인증하지 않았으므로 병원 역할은 생성되지 않는다.
     assert not any(r.name.startswith("MF·") for r in guild.roles)
     assert not any(r.name.endswith("인증됨") and "서울대" in r.name for r in guild.roles)
+
+
+async def test_ensure_all_removes_legacy_hospital_channels(
+    service: ChannelService, bot: FakeBot
+) -> None:
+    """옛 구조(단일 카테고리 + 병원 텍스트 채널) 기록을 정리(삭제)한다."""
+    hospital = await bot.hospitals.create("서울대학교병원", "서울대학교병원")
+    guild = FakeGuild()
+    # 옛 구조를 흉내낸다.
+    legacy_cat = await guild.create_category("병원-커뮤니티")
+    legacy_ch = await guild.create_text_channel(
+        "🏥-서울대학교병원", category=legacy_cat
+    )
+    await bot.managed_channels.upsert(
+        guild.id, "category", HOSPITAL_CATEGORY_KEY, legacy_cat.id, legacy_cat.name
+    )
+    await bot.managed_channels.upsert(
+        guild.id,
+        "channel",
+        f"ch:hospital:{hospital.id}",
+        legacy_ch.id,
+        legacy_ch.name,
+    )
+
+    await service.ensure_all(guild)  # type: ignore[arg-type]
+
+    # 레거시 채널/기록이 삭제되어야 한다.
+    assert getattr(legacy_ch, "deleted", False) is True
+    assert getattr(legacy_cat, "deleted", False) is True
+    assert await bot.managed_channels.get(guild.id, HOSPITAL_CATEGORY_KEY) is None
+    assert (
+        await bot.managed_channels.get(guild.id, f"ch:hospital:{hospital.id}")
+    ) is None
+    # 새 구조의 병원 카테고리는 존재한다.
+    assert await bot.managed_channels.get(
+        guild.id, ChannelService.hospital_category_key(hospital.id)
+    ) is not None
 
 
 async def test_auto_create_disabled_creates_nothing(
@@ -293,20 +323,47 @@ async def test_managed_channels_recorded_for_reuse(
     assert guild.get_channel(panel_record.discord_id) is not None
 
 
-async def test_period_thread_created_and_reused(
+async def test_period_channel_created_and_reused(
     service: ChannelService, bot: FakeBot
 ) -> None:
+    """기간 채널은 병원 카테고리 안에 만들어지고, 이름은 {year}년-{month}월 이다."""
     hospital = await bot.hospitals.create("서울대학교병원", "서울대학교병원")
     guild = FakeGuild()
-    thread = await service.ensure_period_thread(
-        guild, hospital.id, hospital.name, "2020년 3월 ~ 2020년 5월"  # type: ignore[arg-type]
+    channel = await service.ensure_period_channel(
+        guild, hospital.id, hospital.name, ym(2020, 3)  # type: ignore[arg-type]
     )
-    assert thread is not None and thread.name == "2020년 3월 ~ 2020년 5월"
+    assert channel is not None and channel.name == "2020년-3월"
+    # 병원 카테고리 안에 있어야 한다.
+    assert channel.category is not None
+    assert channel.category.name == "🏥-서울대학교병원"
 
-    again = await service.ensure_period_thread(
-        guild, hospital.id, hospital.name, "2020년 3월 ~ 2020년 5월"  # type: ignore[arg-type]
+    again = await service.ensure_period_channel(
+        guild, hospital.id, hospital.name, ym(2020, 3)  # type: ignore[arg-type]
     )
-    assert again is thread
+    assert again is channel
+
+
+async def test_period_channel_permissions_hide_from_everyone(
+    service: ChannelService, bot: FakeBot
+) -> None:
+    """기간 채널은 병원 역할만 볼 수 있고, @everyone 은 차단되어야 한다."""
+    hospital = await bot.hospitals.create("서울대학교병원", "서울대학교병원")
+    guild = FakeGuild()
+    channel = await service.ensure_period_channel(
+        guild, hospital.id, hospital.name, ym(2020, 3)  # type: ignore[arg-type]
+    )
+    assert channel is not None and channel.overwrites is not None
+    # @everyone(길드 기본 역할)은 view_channel=False.
+    everyone_ow = channel.overwrites[guild.default_role]
+    assert everyone_ow.view_channel is False
+    # 병원 역할은 view/send/history 모두 허용.
+    role_record = await bot.managed_roles.get(guild.id, f"hospital:{hospital.id}")
+    assert role_record is not None
+    hospital_role = guild.get_role(role_record.discord_id)
+    role_ow = channel.overwrites[hospital_role]
+    assert role_ow.view_channel is True
+    assert role_ow.send_messages is True
+    assert role_ow.read_message_history is True
 
 
 def test_months_for_admission_includes_both_ends() -> None:
@@ -329,7 +386,7 @@ def test_months_for_admission_includes_both_ends() -> None:
 async def test_ensure_community_access_only_verified_periods(
     service: ChannelService, bot: FakeBot
 ) -> None:
-    """'병원 역할 선택' 없이, 인증(verified)된 이력만 기간 스레드가 열린다."""
+    """'병원 역할 선택' 없이, 인증(verified)된 이력만 기간 채널이 열린다."""
     await bot.users.ensure_user(1)
     hospital = await bot.hospitals.create("서울대학교병원", "서울대학교병원")
     child = await bot.hospitals.create("서울대학교어린이병원", "서울대학교어린이병원")
@@ -345,7 +402,7 @@ async def test_ensure_community_access_only_verified_periods(
         is_ongoing=False,
     )
     await bot.admissions.set_verification(adm_id, "verified")
-    # 미인증(자기 신고) 이력 — 스레드가 생기면 안 된다.
+    # 미인증(자기 신고) 이력 — 기간 채널이 생기면 안 된다.
     await bot.admissions.add(
         user_id=1,
         hospital_id=child.id,
@@ -359,20 +416,21 @@ async def test_ensure_community_access_only_verified_periods(
     guild = FakeGuild()
     await service.ensure_community_access(guild, 1)  # type: ignore[arg-type]
 
-    thread_names = [t.name for c in guild.text_channels for t in c.threads]
-    assert "2020년 3월" in thread_names
-    assert "2021년 1월" not in thread_names
-
-    # 인증된 병원 스레드에는 사용자가 추가되어 있어야 한다.
-    main_channel = next(
-        c for c in guild.text_channels if "서울대학교병원" in c.name
+    # 인증된 병원 카테고리 안에 "2020년-3월" 기간 채널이 있어야 한다.
+    hospital_cat = next(
+        (c for c in guild.categories if "서울대학교병원" in c.name), None
     )
-    assert main_channel.threads
-    assert 1 in main_channel.threads[0].members
+    assert hospital_cat is not None
+    period_names = [c.name for c in hospital_cat.text_channels]
+    assert "2020년-3월" in period_names
+    assert "2021년-1월" not in period_names
 
-    # 미인증 병원(어린이병원)에는 기간 스레드가 만들어지지 않아야 한다.
-    child_channel = next(
-        (c for c in guild.text_channels if "서울대학교어린이병원" in c.name),
-        None,
+    # 인증된 병원 역할이 생성되어 있어야 한다 (역할이 있으면 채널이 보인다).
+    role_record = await bot.managed_roles.get(guild.id, f"hospital:{hospital.id}")
+    assert role_record is not None
+
+    # 미인증 병원(어린이병원)에는 기간 채널이 만들어지지 않아야 한다.
+    child_cat = next(
+        (c for c in guild.categories if "서울대학교어린이병원" in c.name), None
     )
-    assert child_channel is None or child_channel.threads == []
+    assert child_cat is None or child_cat.text_channels == []

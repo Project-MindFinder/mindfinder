@@ -1,11 +1,11 @@
-"""커뮤니티 코그: 전체/병원/기간 단위 커뮤니티(스레드) 안내 및 동기화.
+"""커뮤니티 코그: 전체/병원/기간 단위 커뮤니티(채널) 안내 및 동기화.
 
 설계:
 - **전체 커뮤니티**는 1단계(자기 신고) 이상이면 이용하는 고정 채널.
-- **병원·기간 커뮤니티**는 병원 채널 안의 **월 단위 비공개 스레드**로 운영한다.
+- **병원·기간 커뮤니티**는 병원 카테고리 안의 **월 단위 비공개 채널**로 운영한다.
   - 서류/지식 인증(2단계)을 받은 병원에 한해,
-  - 내 입원 기간에 걸치는 월 스레드에만 자동 초대된다(다른 기간은 보이지 않음).
-- 이 코그는 내가 접근 가능한 기간 스레드를 확인/동기화하고 목록을 보여준다.
+  - 내 입원 기간에 걸치는 월 채널이 열린다(다른 기간은 보이지 않음).
+- 이 코그는 내가 접근 가능한 기간 채널을 확인/동기화하고 목록을 보여준다.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from discord.ext import commands
 from bot.core import MindFinderBot
 from bot.services.channels import COMMUNITY_CHANNEL_KEY
 from bot.utils.hospitals import hospital_display_name, resolve_canonical
-from bot.utils.periods import format_ym
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +31,7 @@ class CommunityCog(commands.Cog):
 
     @app_commands.command(
         name="커뮤니티",
-        description="내가 이용할 수 있는 병원·기간 커뮤니티(스레드)를 확인합니다.",
+        description="내가 이용할 수 있는 병원·기간 커뮤니티(채널)를 확인합니다.",
     )
     @app_commands.describe(
         병원="확인할 병원 (내 인증 이력 중 하나, 비우면 전체 안내)",
@@ -49,7 +48,7 @@ class CommunityCog(commands.Cog):
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        # 1) 내 기간 스레드 접근을 먼저 동기화한다 (인증 이력 기반).
+        # 1) 내 기간 채널 접근을 먼저 동기화한다 (인증 이력 기반).
         try:
             await self.bot.channel_service.ensure_community_access(
                 interaction.guild, interaction.user.id
@@ -64,7 +63,7 @@ class CommunityCog(commands.Cog):
     async def _build_embed(
         self, interaction: discord.Interaction, hospital_name: str | None
     ) -> discord.Embed:
-        """내가 접근 가능한 기간 스레드 목록을 담은 임베드를 만든다."""
+        """내가 접근 가능한 기간 채널 목록을 담은 임베드를 만든다."""
         guild = interaction.guild
         admissions = await self.bot.admissions.list_by_user(interaction.user.id)
 
@@ -73,7 +72,7 @@ class CommunityCog(commands.Cog):
             description=(
                 "전체 커뮤니티는 1단계 인증이면 이용할 수 있고,\n"
                 "**병원·기간 커뮤니티**는 서류/지식 인증(2단계)을 받은 병원의 "
-                "내 입원 기간에 해당하는 **비공개 월 스레드**로 자동으로 열립니다.\n"
+                "내 입원 기간에 해당하는 **비공개 월 채널**로 자동으로 열립니다.\n"
                 "(같은 기간에 입원했던 인증자에게만 보입니다.)"
             ),
             color=discord.Color.teal(),
@@ -98,7 +97,6 @@ class CommunityCog(commands.Cog):
             )
             return embed
 
-        member = guild.get_member(interaction.user.id)
         found_any = False
         for adm in admissions:
             if hospital_name is not None and adm.hospital.name != hospital_name:
@@ -109,18 +107,16 @@ class CommunityCog(commands.Cog):
             months = self.bot.channel_service.months_for_admission(adm)
             labels: list[str] = []
             for ym_value in months:
-                thread = await self.bot.channel_service.ensure_period_thread(
+                channel = await self.bot.channel_service.ensure_period_channel(
                     guild,
                     adm.hospital_id,
                     adm.hospital.name,
-                    format_ym(ym_value),
-                    private=True,
+                    ym_value,
+                    with_role=True,
                 )
-                if thread is None:
+                if channel is None:
                     continue
-                if member is not None:
-                    await self.bot.channel_service.add_member_to_thread(thread, member)
-                labels.append(thread.mention)
+                labels.append(channel.mention)
             if labels:
                 found_any = True
                 embed.add_field(
@@ -131,10 +127,10 @@ class CommunityCog(commands.Cog):
 
         if not found_any:
             embed.add_field(
-                name="표시할 기간 스레드 없음",
+                name="표시할 기간 채널 없음",
                 value=(
                     "먼저 **서류 인증 또는 지식기반 인증**을 완료하세요. "
-                    "인증이 완료되면 해당 병원·기간 스레드가 자동으로 열립니다."
+                    "인증이 완료되면 해당 병원·기간 채널이 자동으로 열립니다."
                 ),
                 inline=False,
             )

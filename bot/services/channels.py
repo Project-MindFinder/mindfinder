@@ -11,9 +11,9 @@
       · 📢-공지         : 인증(1단계) 이상
   - 매칭 카테고리
       · 🧩-매칭        : 인증(2단계·서류 인증) 이상
-  - 병원-커뮤니티 카테고리
+  - 병원 카테고리 (병원마다 **개별 카테고리**)
       · 🏥-<병원명>     : 해당 병원 인증자만 (역할 기반)
-        └ 기간 스레드 (예: "2020년 3월 ~ 2020년 5월")
+        └ 기간 채널 (예: "2020년-3월") — 해당 월에 입원한 인증자만
 
 권한은 역할 기반이라, 인증/병원 인증을 받으면 역할만 부여하면 된다.
 """
@@ -31,7 +31,7 @@ from bot.services.access_control import (
     AccessControlService,
 )
 from bot.utils.hospitals import hospital_display_name
-from bot.utils.periods import current_ym, format_ym
+from bot.utils.periods import current_ym
 
 if TYPE_CHECKING:  # 순환 임포트 방지를 위해 타입 검사 시에만 임포트한다.
     from bot.core import MindFinderBot
@@ -43,6 +43,7 @@ VERIFY_CATEGORY_KEY = "cat:verify"
 VERIFY_CATEGORY_NAME = "인증"
 COMMUNITY_CATEGORY_KEY = "cat:community"
 COMMUNITY_CATEGORY_NAME = "커뮤니티"
+# (레거시) 단일 병원-커뮤니티 카테고리. 새 구조에서는 병원마다 개별 카테고리를 쓴다.
 HOSPITAL_CATEGORY_KEY = "cat:hospital"
 HOSPITAL_CATEGORY_NAME = "병원-커뮤니티"
 
@@ -143,25 +144,36 @@ class ChannelService:
     # ---------- 카테고리/채널 확보 ----------
 
     async def _ensure_category(
-        self, guild: discord.Guild, key: str, name: str
+        self,
+        guild: discord.Guild,
+        key: str,
+        name: str,
+        overwrites: Optional[dict] = None,
     ) -> Optional[discord.CategoryChannel]:
         # 매칭은 **저장된 ID(discord_id)** 로만 한다 (이름 기준 매칭 금지).
         record = await self.bot.managed_channels.get(guild.id, key)
         if record is not None:
             channel = guild.get_channel(record.discord_id)
             if channel is not None:
-                # 이름/위치가 바뀌었으면 최신 이름으로 맞춘다.
+                # 이름/권한이 바뀌었으면 최신 값으로 맞춘다.
+                edit_kwargs: dict = {}
                 if getattr(channel, "name", None) != name:
+                    edit_kwargs["name"] = name
+                if overwrites is not None:
+                    edit_kwargs["overwrites"] = overwrites
+                if edit_kwargs:
                     try:
-                        await channel.edit(name=name)
+                        await channel.edit(**edit_kwargs)
                     except (discord.Forbidden, discord.HTTPException):
-                        logger.debug("카테고리 이름 동기화 실패: %s", record.discord_id)
+                        logger.debug("카테고리 동기화 실패: %s", record.discord_id)
                 return channel
         if not self.bot.settings.auto_create_channels:
             return None
         try:
             category = await guild.create_category(
-                name=name, reason="MindFinder 채널 자동 구성"
+                name=name,
+                overwrites=overwrites,
+                reason="MindFinder 채널 자동 구성",
             )
         except (discord.Forbidden, discord.HTTPException):
             logger.exception("카테고리 생성 실패: guild=%s key=%s", guild.id, key)
@@ -223,85 +235,111 @@ class ChannelService:
         logger.info("채널 생성: guild=%s key=%s", guild.id, key)
         return channel
 
-    # ---------- 병원 채널 ----------
+    # ---------- 병원 카테고리/기간 채널 ----------
 
     @staticmethod
-    def hospital_channel_key(hospital_id: int) -> str:
-        return f"ch:hospital:{hospital_id}"
+    def hospital_category_key(hospital_id: int) -> str:
+        """병원 개별 카테고리 키 (예: cat:hospital:3)."""
+        return f"cat:hospital:{hospital_id}"
 
     @staticmethod
-    def hospital_channel_name(hospital_name: str) -> str:
+    def hospital_category_name(hospital_name: str) -> str:
         # 병동 정보가 있으면 함께 표시한다 (예: 서울대학교어린이병원 7A병동).
         return _clip(f"🏥-{hospital_display_name(hospital_name)}")
 
-    async def _ensure_hospital_text_channel(
+    @staticmethod
+    def period_channel_key(hospital_id: int, ym_value: int) -> str:
+        """기간(월) 채널 키 (예: ch:hospital:3:24302)."""
+        return f"ch:hospital:{hospital_id}:{ym_value}"
+
+    @staticmethod
+    def period_channel_name(ym_value: int) -> str:
+        """기간 채널 이름 (예: 2025년-3월)."""
+        year = ym_value // 12
+        month = ym_value % 12 + 1
+        return _clip(f"{year}년-{month}월")
+
+    def _hospital_overwrites(
+        self, guild: discord.Guild, hospital_role: Optional[discord.Role]
+    ) -> dict:
+        """병원 카테고리/기간 채널 공통 권한.
+
+        해당 **병원 역할**을 가진 사람만 볼 수 있다.
+        @everyone 은 차단되고, tier2(서류 인증) 역할은 호출부에서 명시적으로 차단한다.
+        """
+        overwrites = self._overwrites(
+            guild, public=False, view_roles=[hospital_role]
+        )
+        if hospital_role is not None:
+            overwrites[hospital_role] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+            )
+        return overwrites
+
+    async def ensure_hospital_category(
         self,
         guild: discord.Guild,
-        key: str,
-        name: str,
-        category: Optional[discord.CategoryChannel],
-        overwrites: dict,
-    ) -> Optional[discord.TextChannel]:
-        """병원 전용 **텍스트 채널**을 확보한다.
+        hospital_id: int,
+        hospital_name: str,
+        *,
+        with_role: bool = True,
+    ) -> Optional[discord.CategoryChannel]:
+        """병원 **개별 카테고리**(이름 = 병원명)를 확보한다.
 
-        기간별 커뮤니티는 이 채널 안의 **비공개 스레드**로 운영한다.
-        (디스코드 포럼은 '비공개 스레드'를 만들 수 없어 텍스트 채널을 쓴다.)
+        ``with_role=False`` 이면 **역할을 만들지 않고** 카테고리만 만든다.
+        (병원 역할은 사용자가 인증(verified)을 받았을 때만 생성)
         """
-        # 매칭은 **저장된 ID(discord_id)** 로만 한다 (이름 기준 매칭 금지).
-        record = await self.bot.managed_channels.get(guild.id, key)
-        channel: Optional[discord.TextChannel] = None
-        if record is not None:
-            found = guild.get_channel(record.discord_id)
-            if found is not None:
-                ctype = getattr(found, "type", None)
-                if ctype is not None and ctype == discord.ChannelType.forum:
-                    # 이전에 만든 '포럼' → 텍스트 채널로 교체한다.
-                    try:
-                        await found.delete(  # type: ignore[attr-defined]
-                            reason="MindFinder 병원 커뮤니티를 텍스트 채널로 전환"
-                        )
-                        logger.info(
-                            "기존 병원 채널 삭제(텍스트 전환): %s", record.discord_id
-                        )
-                    except (discord.Forbidden, discord.HTTPException):
-                        logger.debug(
-                            "기존 병원 채널 삭제 실패: %s", record.discord_id
-                        )
-                else:
-                    # 텍스트 채널이거나 타입 정보가 없는 대역(테스트)은 재사용한다.
-                    channel = found  # type: ignore[assignment]
-        if channel is not None:
-            # 이름/카테고리/권한을 최신 값으로 맞춘다 (ID 로 추적하므로 가능).
-            edit_kwargs: dict = {"overwrites": overwrites}
-            if getattr(channel, "name", None) != name:
-                edit_kwargs["name"] = name
-            if category is not None and getattr(channel, "category", None) != category:
-                edit_kwargs["category"] = category
-            try:
-                await channel.edit(**edit_kwargs)
-            except (discord.Forbidden, discord.HTTPException):
-                logger.debug("병원 채널 동기화 실패: channel=%s", channel.id)
-            await self.bot.managed_channels.upsert(
-                guild.id, "channel", key, channel.id, channel.name
+        hospital_role = None
+        if with_role:
+            hospital_role = await self.bot.access.hospital_role(
+                guild, hospital_id, hospital_name
             )
-            return channel
-        if not self.bot.settings.auto_create_channels:
-            return None
-        try:
-            channel = await guild.create_text_channel(
-                name=name,
-                category=category,
-                overwrites=overwrites,
-                reason="MindFinder 채널 자동 구성",
-            )
-        except (discord.Forbidden, discord.HTTPException):
-            logger.exception("병원 채널 생성 실패: guild=%s key=%s", guild.id, key)
-            return None
-        await self.bot.managed_channels.upsert(
-            guild.id, "channel", key, channel.id, channel.name
+        tier2_role = await self.bot.access.tier_role(guild, 2)
+        overwrites = self._hospital_overwrites(guild, hospital_role)
+        # tier2 라도 해당 병원 역할이 없으면 못 보도록 명시적으로 차단
+        if tier2_role is not None:
+            overwrites[tier2_role] = discord.PermissionOverwrite(view_channel=False)
+        return await self._ensure_category(
+            guild,
+            self.hospital_category_key(hospital_id),
+            self.hospital_category_name(hospital_name),
+            overwrites,
         )
-        logger.info("병원 채널 생성: guild=%s key=%s", guild.id, key)
-        return channel
+
+    async def ensure_period_channel(
+        self,
+        guild: discord.Guild,
+        hospital_id: int,
+        hospital_name: str,
+        ym_value: int,
+        *,
+        with_role: bool = True,
+    ) -> Optional[discord.TextChannel]:
+        """병원 카테고리 안에 **기간(월) 비공개 채널**을 확보한다.
+
+        이름은 ``{year}년-{month}월`` 이며, 해당 병원 역할을 가진 사람만 본다.
+        """
+        category = await self.ensure_hospital_category(
+            guild, hospital_id, hospital_name, with_role=with_role
+        )
+        hospital_role = None
+        if with_role:
+            hospital_role = await self.bot.access.hospital_role(
+                guild, hospital_id, hospital_name
+            )
+        tier2_role = await self.bot.access.tier_role(guild, 2)
+        overwrites = self._hospital_overwrites(guild, hospital_role)
+        if tier2_role is not None:
+            overwrites[tier2_role] = discord.PermissionOverwrite(view_channel=False)
+        return await self._ensure_text(
+            guild,
+            self.period_channel_key(hospital_id, ym_value),
+            self.period_channel_name(ym_value),
+            category,
+            overwrites,
+        )
 
     async def ensure_hospital_channel(
         self,
@@ -310,44 +348,14 @@ class ChannelService:
         hospital_name: str,
         *,
         with_role: bool = True,
-    ) -> Optional[discord.TextChannel]:
-        """병원 전용 **텍스트 채널**을 확보한다 (기간별 커뮤니티는 비공개 스레드).
+    ) -> Optional[discord.CategoryChannel]:
+        """(호환용) 병원 전용 공간을 확보한다.
 
-        ``with_role=False`` 이면 **역할을 만들지 않고** 채널만 만든다.
-        (병원 역할은 사용자가 커뮤니티 패널에서 직접 선택했을 때만 생성)
+        새 구조에서는 병원마다 **카테고리**를 만들고 그 안에 기간 채널을 둔다.
+        기존 호출부가 깨지지 않도록 카테고리 확보로 위임한다.
         """
-        category = await self._ensure_category(
-            guild, HOSPITAL_CATEGORY_KEY, HOSPITAL_CATEGORY_NAME
-        )
-        hospital_role = None
-        if with_role:
-            hospital_role = await self.bot.access.hospital_role(
-                guild, hospital_id, hospital_name
-            )
-        tier2_role = await self.bot.access.tier_role(guild, 2)
-        overwrites = self._overwrites(
-            guild,
-            public=False,
-            view_roles=[hospital_role],
-            deny_roles=[],
-        )
-        # tier2 라도 해당 병원 역할이 없으면 못 보도록 명시적으로 차단
-        if tier2_role is not None:
-            overwrites[tier2_role] = discord.PermissionOverwrite(view_channel=False)
-        if hospital_role is not None:
-            overwrites[hospital_role] = discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-                create_private_threads=True,
-                send_messages_in_threads=True,
-            )
-        return await self._ensure_hospital_text_channel(
-            guild,
-            self.hospital_channel_key(hospital_id),
-            self.hospital_channel_name(hospital_name),
-            category,
-            overwrites,
+        return await self.ensure_hospital_category(
+            guild, hospital_id, hospital_name, with_role=with_role
         )
 
     async def ensure_optin_hospital(
@@ -356,9 +364,9 @@ class ChannelService:
         user_id: int,
         hospital_id: int,
         hospital_name: str,
-    ) -> Optional[discord.TextChannel]:
-        """사용자가 특정 병원 역할을 '선택'했을 때 채널/역할을 확보하고 부여한다."""
-        channel = await self.ensure_hospital_channel(
+    ) -> Optional[discord.CategoryChannel]:
+        """사용자가 특정 병원 역할을 '선택'했을 때 카테고리/역할을 확보하고 부여한다."""
+        category = await self.ensure_hospital_category(
             guild, hospital_id, hospital_name, with_role=True
         )
         member = guild.get_member(user_id)
@@ -366,73 +374,7 @@ class ChannelService:
             await self.bot.access.grant_hospital_role(
                 guild, member, hospital_id, hospital_name
             )
-        return channel
-
-    # ---------- 기간 스레드 ----------
-
-    async def ensure_period_thread(
-        self,
-        guild: discord.Guild,
-        hospital_id: int,
-        hospital_name: str,
-        period_text: str,
-        *,
-        private: bool = True,
-    ) -> Optional[discord.Thread]:
-        """병원 **텍스트 채널** 안에 기간 단위 **비공개 스레드**를 만든다.
-
-        각 기간 스레드는 **비공개**로 만들어, 추가된(해당 기간에 입원했던)
-        인원만 볼 수 있다. 이미 있으면 재사용한다.
-        """
-        channel = await self.ensure_hospital_channel(
-            guild, hospital_id, hospital_name
-        )
-        if channel is None:
-            return None
-        thread_name = _clip(period_text)
-        # 활성 스레드에서 먼저 찾는다.
-        for thread in getattr(channel, "threads", []):
-            if thread.name == thread_name:
-                return thread
-        # 보관(archived)된 비공개 스레드도 재사용한다 (중복 생성 방지).
-        archived = getattr(channel, "archived_threads", None)
-        if archived is not None:
-            try:
-                async for thread in archived(private=True, limit=100):
-                    if thread.name == thread_name:
-                        return thread
-            except (discord.Forbidden, discord.HTTPException):
-                logger.debug(
-                    "보관 스레드 조회 실패: channel=%s", getattr(channel, "id", None)
-                )
-        # 비공개 스레드는 생성 시 타입을 지정해야 한다 (생성 후 변경 불가).
-        thread_type = (
-            discord.ChannelType.private_thread
-            if private
-            else discord.ChannelType.public_thread
-        )
-        try:
-            thread = await channel.create_thread(
-                name=thread_name,
-                type=thread_type,
-                # 비공개 스레드는 멤버를 추가(add_user)해야 하므로 invitable=True 여야 한다.
-                invitable=True,
-                reason="MindFinder 기간 커뮤니티",
-            )
-        except (discord.Forbidden, discord.HTTPException):
-            logger.exception("기간 스레드 생성 실패: hospital=%s", hospital_id)
-            return None
-        if thread is None:
-            return None
-        # 첫 안내 메시지를 남긴다.
-        try:
-            await thread.send(
-                f"**{hospital_display_name(hospital_name)} · {period_text}**\n"
-                "같은 시기에 입원했던 분들과 이야기를 나눠보세요."
-            )
-        except discord.HTTPException:
-            logger.debug("기간 스레드 안내 전송 실패: thread=%s", thread.id)
-        return thread
+        return category
 
     # ---------- 커뮤니티 접근 동기화 ----------
 
@@ -447,31 +389,17 @@ class ChannelService:
             end = start
         return list(range(start, end + 1))
 
-    async def add_member_to_thread(
-        self, thread: Optional[discord.Thread], member: discord.Member
-    ) -> None:
-        """비공개 스레드에 멤버를 추가한다 (이미 참여 중이면 무시)."""
-        if thread is None or member is None:
-            return
-        try:
-            await thread.add_user(member)
-        except discord.HTTPException:
-            logger.debug(
-                "스레드 참여 추가 실패: thread=%s", getattr(thread, "id", None)
-            )
-
     async def ensure_community_access(
         self, guild: discord.Guild, user_id: int
     ) -> None:
-        """인증 사용자를 자신의 이력(병원·기간)에 맞는 비공개 스레드에 초대한다.
+        """인증 사용자를 자신의 이력(병원·기간)에 맞는 기간 **채널**로 안내한다.
 
         **별도 '병원 역할 선택' 없이**, 서류/지식 인증(verified)을 받은 이력을
         기준으로 자동 처리한다.
 
-        - 인증받은 병원의 역할/포럼을 확보·부여하고
-        - 입원 기간에 걸치는 '월 단위' 비공개 스레드를 확보한 뒤
-        - 사용자를 그 스레드에 추가한다.
-          (그 스레드는 같은 기간에 입원한 인증자에게만 보인다.)
+        - 인증받은 병원의 카테고리/역할을 확보·부여하고 (역할이 있으면
+          기간 채널이 자동으로 보인다)
+        - 입원 기간에 걸치는 '월 단위' 비공개 채널을 확보한다.
         """
         member = guild.get_member(user_id)
         if member is None:
@@ -486,9 +414,9 @@ class ChannelService:
             # 정신과가 아닌 입원(응급실 등)은 커뮤니티 대상이 아니다.
             if not getattr(adm, "is_community_eligible", True):
                 continue
-            # 인증된 병원의 역할/포럼을 자동 확보하고 역할을 부여한다.
+            # 인증된 병원의 카테고리/역할을 자동 확보하고 역할을 부여한다.
             try:
-                await self.ensure_hospital_channel(
+                await self.ensure_hospital_category(
                     guild, adm.hospital_id, adm.hospital.name, with_role=True
                 )
                 await self.bot.access.grant_hospital_role(
@@ -496,23 +424,21 @@ class ChannelService:
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "병원 역할/채널 자동 확보 실패: hospital=%s", adm.hospital_id
+                    "병원 역할/카테고리 자동 확보 실패: hospital=%s", adm.hospital_id
                 )
             for ym_value in self.months_for_admission(adm):
-                thread = await self.ensure_period_thread(
+                await self.ensure_period_channel(
                     guild,
                     adm.hospital_id,
                     adm.hospital.name,
-                    format_ym(ym_value),
-                    private=True,
+                    ym_value,
+                    with_role=True,
                 )
-                await self.add_member_to_thread(thread, member)
 
     # ---------- 전체 구성 ----------
 
     async def ensure_all(self, guild: discord.Guild) -> None:
         """용도별 채널/카테고리 전체를 확보한다."""
-        settings = self.bot.settings
         tier1_role = await self.bot.access.tier_role(guild, 1)
         tier2_role = await self.bot.access.tier_role(guild, 2)
 
@@ -579,15 +505,47 @@ class ChannelService:
             guild, ADMIN_CHANNEL_KEY, ADMIN_CHANNEL_NAME, admin_cat, admin_ow
         )
 
-        # 5) 병원별 채널
-        #    '병원 역할 선택' 없이, 인증(verified)된 이력이 있는 병원의
-        #    채널·역할을 자동으로 확보한다. 그 외 병원은 채널만 확보한다.
+        # 5) 병원별 카테고리
+        #    '병원 역할 선택' 없이, 인증(verified)된 이력이 있는 병원은
+        #    카테고리·역할을 자동으로 확보한다. 그 외 병원은 카테고리만 확보한다.
+        #    (기간 채널은 인증 사용자가 생길 때 ensure_community_access 가 만든다.)
+        await self._cleanup_legacy_hospital_channels(guild)
         verified_hospital_ids = await self._verified_hospital_ids()
         for hospital in await self.bot.hospitals.list_all():
             with_role = hospital.id in verified_hospital_ids
-            await self.ensure_hospital_channel(
+            await self.ensure_hospital_category(
                 guild, hospital.id, hospital.name, with_role=with_role
             )
+
+    async def _cleanup_legacy_hospital_channels(self, guild: discord.Guild) -> None:
+        """옛 구조(단일 병원 카테고리 + 병원별 텍스트 채널)를 정리한다.
+
+        - ``cat:hospital`` (단일 카테고리)
+        - ``ch:hospital:{id}`` (병원별 텍스트 채널)
+        기록(managed_channels)에서 찾아 실제 채널을 삭제하고 기록도 지운다.
+        """
+        try:
+            records = await self.bot.managed_channels.list_for_guild(guild.id)
+        except Exception:  # noqa: BLE001
+            logger.exception("관리 채널 목록 조회 실패: guild=%s", guild.id)
+            return
+        for record in records:
+            key = record.key
+            is_legacy = key == HOSPITAL_CATEGORY_KEY or (
+                key.startswith("ch:hospital:") and key.count(":") == 2
+            )
+            if not is_legacy:
+                continue
+            channel = guild.get_channel(record.discord_id)
+            if channel is not None:
+                try:
+                    await channel.delete(  # type: ignore[attr-defined]
+                        reason="MindFinder 레거시 병원 채널 정리"
+                    )
+                    logger.info("레거시 병원 채널 삭제: key=%s id=%s", key, record.discord_id)
+                except (discord.Forbidden, discord.HTTPException):
+                    logger.debug("레거시 병원 채널 삭제 실패: %s", record.discord_id)
+            await self.bot.managed_channels.delete(guild.id, key)
 
     async def _verified_hospital_ids(self) -> set[int]:
         """인증(verified)된 이력이 있는 병원 id 집합 (역할 생성 대상)."""
