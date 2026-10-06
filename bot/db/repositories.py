@@ -252,9 +252,13 @@ class VerificationRepository:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    async def create(self, user_id: int, admission_id: Optional[int]) -> int:
+    async def create(
+        self, user_id: int, admission_id: Optional[int], *, method: str = "document"
+    ) -> int:
         async with self.db.session() as session:
-            request = VerificationRequest(user_id=user_id, admission_id=admission_id)
+            request = VerificationRequest(
+                user_id=user_id, admission_id=admission_id, method=method
+            )
             session.add(request)
             await session.commit()
             await session.refresh(request)
@@ -367,7 +371,25 @@ class VerificationRepository:
         async with self.db.session() as session:
             result = await session.execute(
                 select(VerificationRequest)
-                .where(VerificationRequest.status == "pending")
+                .where(
+                    VerificationRequest.status == "pending",
+                    VerificationRequest.method == "document",
+                )
+                .order_by(VerificationRequest.created_at)
+            )
+            return result.scalars().all()
+
+    async def list_pending_by_method(
+        self, method: str
+    ) -> Sequence[VerificationRequest]:
+        """특정 인증 방식의 대기 중 요청 목록 (예: 기타 수동 승인)."""
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(VerificationRequest)
+                .where(
+                    VerificationRequest.status == "pending",
+                    VerificationRequest.method == method,
+                )
                 .order_by(VerificationRequest.created_at)
             )
             return result.scalars().all()

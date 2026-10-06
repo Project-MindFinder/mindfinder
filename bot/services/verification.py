@@ -33,6 +33,7 @@ AUTO_VERIFY_HOSPITAL_NAMES = {"서울대학교병원", "서울대학교어린이
 # 인증 상태 표시
 VERIFICATION_LABEL = {
     "self_reported": "🟡 자기 신고 (미인증)",
+    "other_pending": "🟠 기타 인증 심사 중",
     "verified": "🟢 인증 완료",
     "rejected": "🔴 인증 반려",
 }
@@ -367,10 +368,28 @@ class VerificationService:
     async def submit_proof(self, user_id: int, admission_id: int) -> int:
         """서류 심사 요청을 생성하고 심사 번호를 반환한다."""
         request_id = await self.bot.verifications.create(
-            user_id=user_id, admission_id=admission_id
+            user_id=user_id, admission_id=admission_id, method="document"
         )
         await self.bot.audit.log(
             "verification.request",
+            actor_id=user_id,
+            target=f"verification:{request_id}",
+        )
+        return request_id
+
+    async def submit_other_proof(self, user_id: int, admission_id: int) -> int:
+        """서류·지식 외 '기타 방법' 인증 요청을 생성한다 (관리자 수동 승인).
+
+        서류 없이 사유(경위)만 제출하면 관리자가 대화로 사실을 확인한 뒤
+        승인/거절한다. 접수 시점의 이력은 'other_pending' 으로 표시해
+        아직 2단계가 아님을 명확히 한다.
+        """
+        request_id = await self.bot.verifications.create(
+            user_id=user_id, admission_id=admission_id, method="other"
+        )
+        await self.bot.admissions.set_verification(admission_id, "other_pending")
+        await self.bot.audit.log(
+            "verification.request_other",
             actor_id=user_id,
             target=f"verification:{request_id}",
         )

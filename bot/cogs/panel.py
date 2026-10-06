@@ -337,6 +337,144 @@ class UnifiedVerifyModal(discord.ui.Modal, title="서류 인증"):
 
 
 # --------------------------------------------------------------------------- #
+# 모달: 기타 방법 인증 (서류·지식 외 · 관리자 수동 승인)
+# --------------------------------------------------------------------------- #
+class OtherVerifyModal(discord.ui.Modal, title="기타 방법 인증 신청"):
+    """서류·지식기반 외의 방법으로 인증을 신청한다 (관리자 수동 승인).
+
+    예: 진료기록 사본, 병원 발급 서류의 사진, 보호자 확인 등. 서류 원본을
+    봇에 보관하지 않기 위해, 사유(경위)만 적어 제출하고 실제 확인은 관리자가
+    대화로 진행한다.
+    """
+
+    병원 = discord.ui.TextInput(
+        label="병원명",
+        placeholder="예: 국립정신건강센터",
+        required=True,
+        max_length=100,
+    )
+    기간 = discord.ui.TextInput(
+        label="입원 기간 (예: 2020-03 ~ 2020-06)",
+        placeholder="2020-03 ~ 2020-06 · 입원 중이면 시작만 입력",
+        required=True,
+        max_length=40,
+    )
+    사유 = discord.ui.TextInput(
+        label="인증이 필요한 이유 · 확인 방법",
+        placeholder="서류를 낼 수 없는 사정과, 어떻게 확인받을 수 있는지 적어주세요.",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=500,
+    )
+
+    def __init__(self, bot: MindFinderBot, service: VerificationService) -> None:
+        super().__init__()
+        self.bot = bot
+        self.service = service
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            start_year, start_month, end_year, end_month = parse_period_input(
+                str(self.기간.value or "")
+            )
+        except PeriodError as exc:
+            await interaction.response.send_message(f"⚠️ {exc}", ephemeral=True)
+            return
+
+        is_ongoing = end_year is None and end_month is None
+        try:
+            admission_id, period, hospital_name = await self.service.register_admission(
+                user_id=interaction.user.id,
+                hospital_name=str(self.병원.value or ""),
+                start_year=start_year,
+                start_month=start_month,
+                end_year=end_year,
+                end_month=end_month,
+                is_ongoing=is_ongoing,
+            )
+        except PeriodError as exc:
+            await interaction.response.send_message(f"⚠️ {exc}", ephemeral=True)
+            return
+
+        reason = str(self.사유.value or "").strip()
+        request_id = await self.service.submit_other_proof(
+            interaction.user.id, admission_id
+        )
+
+        # 자기 신고 등록 → 1단계 역할 + 병원 채널 확보
+        if interaction.guild is not None:
+            member = interaction.guild.get_member(interaction.user.id)
+            if member is not None:
+                try:
+                    await self.bot.access.grant_tier(interaction.guild, member, 1)
+                except Exception:  # noqa: BLE001
+                    logger.exception("1단계 역할 부여 실패: user=%s", interaction.user.id)
+            try:
+                hospital = await self.bot.hospitals.get_by_name(hospital_name)
+                if hospital is not None:
+                    await self.bot.channel_service.ensure_hospital_channel(
+                        interaction.guild, hospital.id, hospital.name
+                    )
+            except Exception:  # noqa: BLE001
+                logger.exception("병원 채널 확보 실패: hospital=%s", hospital_name)
+
+        await notify_admins_of_other_request(
+            self.bot,
+            request_id=request_id,
+            user_id=interaction.user.id,
+            hospital_name=hospital_name,
+            period_text=period.text(),
+            reason=reason,
+        )
+
+        embed = discord.Embed(
+            title="🟠 기타 방법 인증이 접수되었습니다",
+            description=(
+                f"**병원**: {hospital_display_name(hospital_name)}\n"
+                f"**기간**: {period.text()}\n"
+                f"**심사번호**: `{request_id}`\n\n"
+                "관리자가 확인 후 승인 여부를 알려드립니다.\n"
+                "추가 확인이 필요하면 관리자가 DM 으로 연락드릴 수 있습니다."
+            ),
+            color=discord.Color.orange(),
+        )
+        embed.set_footer(text="서류·지식기반 인증이 어려울 때 사용하는 대체 경로입니다.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+async def notify_admins_of_other_request(
+    bot: MindFinderBot,
+    *,
+    request_id: int,
+    user_id: int,
+    hospital_name: str,
+    period_text: str,
+    reason: str,
+) -> None:
+    """관리자 패널 채널에 기타 방법 인증 신청을 게시한다."""
+    for guild in bot.guilds:
+        channel = await bot.channel_service.managed_text_channel(
+            guild, ADMIN_CHANNEL_KEY
+        )
+        if channel is None:
+            continue
+        view = OtherVerifyReviewView(bot, request_id)
+        try:
+            await channel.send(
+                f"🟠 **기타 방법 인증 신청** (`{request_id}`)\n"
+                f"· 신청자: <@{user_id}>\n"
+                f"· 병원: **{hospital_display_name(hospital_name)}**\n"
+                f"· 기간: {period_text}\n"
+                f"· 사유: {reason[:300]}\n"
+                "확인 후 승인하면 2단계 인증이 부여됩니다.",
+                view=view,
+            )
+        except discord.HTTPException:
+            logger.exception("기타 인증 알림 실패: request=%s", request_id)
+        return
+
+
+# --------------------------------------------------------------------------- #
 # 모달: 기타 병원 직접 입력 (관리자 승인 요청)
 # --------------------------------------------------------------------------- #
 class HospitalRequestModal(discord.ui.Modal, title="기타 병원 추가 요청"):
@@ -498,6 +636,108 @@ class HospitalRequestReviewView(discord.ui.View):
             self.request_id, "rejected", reviewer_id=interaction.user.id
         )
         await interaction.response.send_message("요청을 거절했습니다.", ephemeral=True)
+
+
+class OtherVerifyReviewView(discord.ui.View):
+    """관리자가 '기타 방법' 인증 신청을 승인/거절하는 영구 뷰."""
+
+    def __init__(self, bot: MindFinderBot, request_id: int) -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.request_id = request_id
+        approve = discord.ui.Button(
+            label="승인", style=discord.ButtonStyle.success,
+            custom_id=f"mf:ovr:approve:{request_id}",
+        )
+        reject = discord.ui.Button(
+            label="거절", style=discord.ButtonStyle.danger,
+            custom_id=f"mf:ovr:reject:{request_id}",
+        )
+        approve.callback = self._approve
+        reject.callback = self._reject
+        self.add_item(approve)
+        self.add_item(reject)
+
+    def _is_admin(self, interaction: discord.Interaction) -> bool:
+        perms = interaction.user.guild_permissions
+        return bool(perms.administrator or perms.manage_guild)
+
+    async def _approve(self, interaction: discord.Interaction) -> None:
+        if not self._is_admin(interaction):
+            await interaction.response.send_message(
+                "관리자만 처리할 수 있습니다.", ephemeral=True
+            )
+            return
+        req = await self.bot.verifications.get_by_id(self.request_id)
+        if req is None or req.status != "pending":
+            await interaction.response.send_message(
+                "이미 처리된 요청입니다.", ephemeral=True
+            )
+            return
+
+        # 2단계 인증 승인: 검증 요청/이력 상태 갱신
+        await self.bot.verifications.resolve(
+            self.request_id, "approved", interaction.user.id
+        )
+        hospital_name: Optional[str] = None
+        if req.admission_id:
+            await self.bot.admissions.set_verification(req.admission_id, "verified")
+            adm = await self.bot.admissions.get_by_id(req.admission_id)
+            if adm is not None and adm.hospital is not None:
+                hospital_name = adm.hospital.name
+
+        # 2단계 역할 + 병원 역할/채널 + 기간 스레드 부여
+        if interaction.guild is not None:
+            shim = _ResultShim(hospital_name) if hospital_name else None
+            await grant_verified_access(
+                self.bot, interaction.guild, req.user_id, shim
+            )
+
+        await interaction.response.send_message(
+            "✅ 기타 방법 인증을 승인했습니다.", ephemeral=True
+        )
+        try:
+            user = await self.bot.fetch_user(req.user_id)
+            await user.send(
+                "✅ 기타 방법 인증이 **승인**되었습니다. "
+                "이제 병원·기간 커뮤니티와 매칭을 이용할 수 있습니다."
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("기타 인증 승인 DM 실패: user=%s", req.user_id)
+
+    async def _reject(self, interaction: discord.Interaction) -> None:
+        if not self._is_admin(interaction):
+            await interaction.response.send_message(
+                "관리자만 처리할 수 있습니다.", ephemeral=True
+            )
+            return
+        req = await self.bot.verifications.get_by_id(self.request_id)
+        if req is None or req.status != "pending":
+            await interaction.response.send_message(
+                "이미 처리된 요청입니다.", ephemeral=True
+            )
+            return
+        await self.bot.verifications.resolve(
+            self.request_id, "rejected", interaction.user.id
+        )
+        if req.admission_id:
+            await self.bot.admissions.set_verification(req.admission_id, "rejected")
+        await interaction.response.send_message("기타 인증을 거절했습니다.", ephemeral=True)
+        try:
+            user = await self.bot.fetch_user(req.user_id)
+            await user.send(
+                "🔴 기타 방법 인증이 **거절**되었습니다. "
+                "서류 인증 또는 지식기반 인증을 시도해보세요."
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("기타 인증 거절 DM 실패: user=%s", req.user_id)
+
+
+class _ResultShim:
+    """grant_verified_access 가 기대하는 hospital_name 속성만 가진 경량 객체."""
+
+    def __init__(self, hospital_name: str) -> None:
+        self.hospital_name = hospital_name
 
 
 # --------------------------------------------------------------------------- #
@@ -681,6 +921,22 @@ class VerifyPanelView(discord.ui.View):
         async def _proceed(inner: discord.Interaction) -> None:
             modal = await UnifiedVerifyModal(self.bot, self.vservice).load()
             await inner.response.send_modal(modal)
+
+        if not await ensure_consent(self.bot, interaction, _proceed):
+            return
+        await _proceed(interaction)
+
+    @discord.ui.button(
+        label="기타 방법 인증", style=discord.ButtonStyle.secondary,
+        custom_id="mf:v_other", row=1,
+    )
+    async def other_method(
+        self, interaction: discord.Interaction, _button: discord.ui.Button
+    ) -> None:
+        """서류·지식기반 외의 방법으로 인증을 신청한다 (관리자 수동 승인)."""
+
+        async def _proceed(inner: discord.Interaction) -> None:
+            await inner.response.send_modal(OtherVerifyModal(self.bot, self.vservice))
 
         if not await ensure_consent(self.bot, interaction, _proceed):
             return
@@ -1281,6 +1537,18 @@ class PanelCog(commands.Cog):
                 self.bot.add_view(HospitalRequestReviewView(self.bot, req.id))
             except Exception:  # noqa: BLE001
                 logger.exception("병원 요청 뷰 등록 실패: request=%s", req.id)
+
+        # 재시작 전 접수된 '기타 방법 인증' 검토 버튼을 다시 살린다.
+        try:
+            other_pending = await self.bot.verifications.list_pending_by_method("other")
+        except Exception:  # noqa: BLE001
+            other_pending = []
+            logger.exception("기타 인증 요청 조회 실패")
+        for req in other_pending:
+            try:
+                self.bot.add_view(OtherVerifyReviewView(self.bot, req.id))
+            except Exception:  # noqa: BLE001
+                logger.exception("기타 인증 뷰 등록 실패: request=%s", req.id)
 
         for guild in self.bot.guilds:
             # 1) 용도별 채널/카테고리 전체 구성 (인증/커뮤니티/매칭/관리자/약관/병원별)

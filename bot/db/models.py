@@ -167,6 +167,10 @@ class VerificationRequest(Base):
         ForeignKey("admissions.id", ondelete="SET NULL"), nullable=True
     )
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False, index=True)
+    # 인증 방식: document(서류) | knowledge(지식기반) | other(기타·관리자 수동)
+    method: Mapped[str] = mapped_column(
+        String(20), default="document", nullable=False
+    )
     proof_channel_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     proof_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     reviewer_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
