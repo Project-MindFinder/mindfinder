@@ -170,9 +170,11 @@ class ChannelService:
         if not self.bot.settings.auto_create_channels:
             return None
         try:
+            # 일부 discord.py 버전은 overwrites=None 을 거부한다(TypeError).
+            # 항상 dict 를 넘겨 버전 차이에 견고하게 만든다.
             category = await guild.create_category(
                 name=name,
-                overwrites=overwrites,
+                overwrites=overwrites or {},
                 reason="MindFinder 채널 자동 구성",
             )
         except (discord.Forbidden, discord.HTTPException):
@@ -223,7 +225,7 @@ class ChannelService:
             channel = await guild.create_text_channel(
                 name=name,
                 category=category,
-                overwrites=overwrites,
+                overwrites=overwrites or {},
                 reason="MindFinder 채널 자동 구성",
             )
         except (discord.Forbidden, discord.HTTPException):
