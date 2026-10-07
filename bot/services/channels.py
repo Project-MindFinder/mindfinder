@@ -155,17 +155,8 @@ class ChannelService:
         if record is not None:
             channel = guild.get_channel(record.discord_id)
             if channel is not None:
-                # 이름/권한이 바뀌었으면 최신 값으로 맞춘다.
-                edit_kwargs: dict = {}
-                if getattr(channel, "name", None) != name:
-                    edit_kwargs["name"] = name
-                if overwrites is not None:
-                    edit_kwargs["overwrites"] = overwrites
-                if edit_kwargs:
-                    try:
-                        await channel.edit(**edit_kwargs)
-                    except (discord.Forbidden, discord.HTTPException):
-                        logger.debug("카테고리 동기화 실패: %s", record.discord_id)
+                # 이미 만든 카테고리는 **절대 건드리지 않는다.**
+                # (사용자가 이름을 바꾸거나 위치를 옮겨도 삭제 전까지 유지)
                 return channel
         if not self.bot.settings.auto_create_channels:
             return None
@@ -202,22 +193,9 @@ class ChannelService:
         if record is not None:
             channel = guild.get_channel(record.discord_id)  # type: ignore[assignment]
         if channel is not None:
-            # 이름/카테고리가 바뀌었으면 최신 값으로 맞춘다 (ID 로 추적하므로 가능).
-            edit_kwargs: dict = {}
-            if getattr(channel, "name", None) != name:
-                edit_kwargs["name"] = name
-            if category is not None and getattr(channel, "category", None) != category:
-                edit_kwargs["category"] = category
-            if sync_permissions:
-                edit_kwargs["overwrites"] = overwrites
-            if edit_kwargs:
-                try:
-                    await channel.edit(**edit_kwargs)
-                except (discord.Forbidden, discord.HTTPException):
-                    logger.debug("채널 동기화 실패: channel=%s", channel.id)
-            await self.bot.managed_channels.upsert(
-                guild.id, "channel", key, channel.id, channel.name
-            )
+            # 이미 만든 채널은 **이름/위치/권한을 절대 건드리지 않는다.**
+            # (사용자가 카테고리를 옮기거나 이름을 바꿔도 삭제 전까지 유지)
+            # 멤버별 접근 권한이 필요하면 호출부에서 set_permissions 로 추가한다.
             return channel
         if not self.bot.settings.auto_create_channels:
             return None
@@ -329,44 +307,44 @@ class ChannelService:
           (역할 태그를 선택하지 않아도 채널은 보인다 — 인증만 하면 열림)
         - ``with_role`` 이면 병원 역할을 가진 사람도 볼 수 있게 한다(선택한 경우).
 
-        주의: 기존 채널이 있으면 **오버라이트를 통째로 교체하지 않는다.**
-        (다른 인증자의 개별 권한이 사라지기 때문) 기본 권한만 동기화하고,
-        멤버 개별 권한은 ``set_permissions`` 로 **추가**한다.
+        주의: 이미 만든 채널은 **이름/위치/기본 권한을 건드리지 않는다.**
+        (사용자가 옮기거나 이름을 바꿔도 삭제 전까지 유지)
+        다만 **인증한 멤버 개인에게는 접근 권한을 추가**한다
+        (``set_permissions`` 는 해당 멤버만 변경하므로 기존 권한은 유지된다).
         """
         category = await self.ensure_hospital_category(
             guild, hospital_id, hospital_name, with_role=with_role
         )
-        hospital_role = None
-        if with_role:
-            hospital_role = await self.bot.access.hospital_role(
-                guild, hospital_id, hospital_name
-            )
-        tier2_role = await self.bot.access.tier_role(guild, 2)
-        overwrites = self._hospital_overwrites(guild, hospital_role)
-        if tier2_role is not None:
-            overwrites[tier2_role] = discord.PermissionOverwrite(view_channel=False)
         key = self.period_channel_key(hospital_id, ym_value)
-        # sync_permissions=False 로 두어 **기존 오버라이트를 통째로 교체하지 않는다.**
-        # (다른 인증자의 개별 권한이 사라지는 것을 막는다.)
-        channel = await self._ensure_text(
-            guild,
-            key,
-            self.period_channel_name(ym_value),
-            category,
-            overwrites,
-            sync_permissions=False,
-        )
+        existing = None
+        record = await self.bot.managed_channels.get(guild.id, key)
+        if record is not None:
+            existing = guild.get_channel(record.discord_id)
+        if existing is not None:
+            # 이미 있던 채널은 절대 건드리지 않는다. 멤버 접근만 보강한다.
+            channel = existing
+        else:
+            hospital_role = None
+            if with_role:
+                hospital_role = await self.bot.access.hospital_role(
+                    guild, hospital_id, hospital_name
+                )
+            tier2_role = await self.bot.access.tier_role(guild, 2)
+            overwrites = self._hospital_overwrites(guild, hospital_role)
+            if tier2_role is not None:
+                overwrites[tier2_role] = discord.PermissionOverwrite(
+                    view_channel=False
+                )
+            channel = await self._ensure_text(
+                guild,
+                key,
+                self.period_channel_name(ym_value),
+                category,
+                overwrites,
+                sync_permissions=False,
+            )
         if channel is None:
             return None
-        # 필요한 권한만 **개별 추가**한다 (set_permissions 는 해당 대상만 변경).
-        for target, ow in overwrites.items():
-            try:
-                await channel.set_permissions(target, overwrite=ow, reason="MindFinder 기간 채널 권한")
-            except (discord.Forbidden, discord.HTTPException):
-                logger.debug(
-                    "기간 채널 기본 권한 설정 실패: channel=%s",
-                    getattr(channel, "id", None),
-                )
         # 인증한 사용자 개개인에게 접근 권한을 **추가**한다 (기존 권한 유지).
         for member in members or ():
             if member is None:

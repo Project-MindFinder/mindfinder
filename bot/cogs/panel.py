@@ -58,12 +58,24 @@ async def show_step(
 
     인증 흐름의 각 단계가 새 메시지를 보내면 사용자에게 계속 쌓이므로,
     하나의 ephemeral 메시지를 만들고 이후 단계는 그것을 수정(edit)한다.
-    - 아직 응답 전이면 이 단계에서 처음 메시지를 만든다.
-    - 이미 응답했으면 원본 응답을 수정한다.
+
+    판단 기준:
+    - 이미 응답을 마쳤으면(`defer` 등) 원본 응답을 수정한다.
+    - 상호작용한 메시지가 **ephemeral**(우리가 띄운 단계 메시지)이면 그것을 수정한다.
+    - 그 외(**패널**의 공개 메시지)면 새 ephemeral 메시지를 만든다.
+      (패널 메시지를 수정하면 안내판이 사라지므로 반드시 새로 띄운다.)
     """
+    message = getattr(interaction, "message", None)
+    is_ephemeral = bool(
+        message is not None and getattr(getattr(message, "flags", None), "ephemeral", False)
+    )
     try:
         if interaction.response.is_done():
             await interaction.edit_original_response(
+                content=content, embed=embed, view=view
+            )
+        elif is_ephemeral:
+            await interaction.response.edit_message(
                 content=content, embed=embed, view=view
             )
         else:
