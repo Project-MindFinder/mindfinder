@@ -1,19 +1,21 @@
 # MindFinder 실배포 & CI/CD 초기 세팅 가이드
 
-> ⚠️ **필수 조건 3가지** (하나라도 빠지면 Deploy 가 실패한다)
+> ⚠️ **필수 조건 4가지** (하나라도 빠지면 Deploy 가 실패한다)
 > 1. OAuth 클라이언트에 **`tag:ci`** 부여 + tailnet ACL `tagOwners` 에 `tag:ci` 등록
 >    → 없으면 `OAuth identity empty` 로 즉시 실패 (workflow 의 `tags: tag:ci` 는 고정값)
-> 2. **배포 서버가 tailnet 에 조인되어 있어야 함** → `sudo tailscale up --ssh`
->    → 없으면 `ssh: connect to host ... Connection timed out`
-> 3. 서버 `/opt/mindfinder/.env` 에 `DISCORD_TOKEN`, `GUILD_ID`,
+> 2. **라우터가 Tailscale 서브넷 라우터로 LAN 대역을 광고**하고, CI 노드(tag:ci)가
+>    그 경로를 수용(`--accept-routes`, 워크플로에 포함) → 서버의 **LAN IP** 로 SSH
+> 3. `DEPLOY_HOST` = 서버의 **LAN IP**(예: `192.168.0.10`) (서버에는 Tailscale 없음)
+> 4. 서버 `/opt/mindfinder/.env` 에 `DISCORD_TOKEN`, `GUILD_ID`,
 >    `RESET_VERIFICATIONS_ON_START=false` 존재
 
-이 문서는 **GitHub 저장소 생성 → Tailscale 서버 접속 → CI/CD 자동배포**까지
+이 문서는 **GitHub 저장소 생성 → (서브넷 라우터 경유) 서버 접속 → CI/CD 자동배포**까지
 처음부터 끝까지의 절차를 정리한 것입니다. 위에서 아래로 그대로 따라 하면 됩니다.
 
 - 저장소: <https://github.com/Project-MindFinder/mindfinder>
-- 배포 방식: GitHub Actions 러너가 **Tailscale** 로 사설망에 조인한 뒤
-  **SSH** 로 배포 서버에 접속하여 `docker compose` 로 재기동
+- 배포 방식: GitHub Actions 러너가 **Tailscale** 로 tailnet 에 조인한 뒤,
+  라우터(서브넷 라우터)가 광고하는 **LAN 대역 경로**를 통해
+  서버의 **LAN IP** 로 **SSH** 접속하여 `docker compose` 로 재기동
 - 로컬 PC는 배포 경로에 관여하지 않습니다. (서버 정보는 GitHub Secrets 로만 주입)
 
 ---
@@ -21,21 +23,24 @@
 ## 0. 구성 요약
 
 ```
-[개발 PC]  --git push-->  [GitHub: Project-MindFinder/mindfinder]
-                                   │
-                          (push → Actions)
-                                   ▼
-                        [GitHub Actions 러너]
-                    tailscale/github-action 으로
-                     tailnet 조인 (ephemeral)
-                                   │  SSH (Tailscale IP)
-                                   ▼
-                        [배포 서버 (VPS/NAS)]
-                     docker compose up -d --build
+[개발 PC] --git push--> [GitHub: Project-MindFinder/mindfinder]
+                                 │ (push → Actions)
+                                 ▼
+                       [GitHub Actions 러너]
+                  tailscale/github-action (tag:ci,
+                  --accept-routes) 으로 tailnet 조인
+                                 │  SSH (서버 LAN IP)
+                                 ▼
+                  [라우터 = Tailscale 서브넷 라우터]
+                     LAN 대역(예: 192.168.0.0/24) 광고
+                                 │
+                                 ▼
+                       [배포 서버 (LAN)]
+                  docker compose up -d --build
 ```
 
 - CI(`ci.yml`): push/PR 시 `pytest` 실행
-- CD(`deploy.yml`): `main` push 시 Tailscale SSH 로 서버 배포
+- CD(`deploy.yml`): `main` push 시 서브넷 라우터 경유로 서버 배포
 - 배포 스크립트: `scripts/deploy.sh` (서버에서 실행됨)
 
 ---
@@ -75,51 +80,47 @@ git push -u origin main
 
 배포 서버는 리눅스 계열(예: Debian/Ubuntu)을 기준으로 설명합니다.
 
-### 2-1. Tailscale 설치 및 tailnet 조인
+> 이 서버에는 Tailscale 을 설치하지 않습니다. **라우터**가 Tailscale 서브넷 라우터로
+> LAN 대역을 광고하고, CI 러너가 그 경로로 서버 LAN IP 에 접속합니다.
+
+### 2-1. 라우터를 Tailscale 서브넷 라우터로 설정
+
+라우터(Tailscale 설치된 장비)에서 LAN 대역을 광고합니다.
 
 ```bash
-curl -fsSL https://tailscale.com/install.sh | sh
-# --ssh: Tailscale SSH 활성화 (SSH 키 없이 CI 러너 접속 허용)
-sudo tailscale up --ssh --hostname mindfinder-server
-# 브라우저 인증 완료 후 사설 IP 확인
-tailscale ip -4        # 예: 100.x.y.z  → DEPLOY_HOST 에 등록
-tailscale status       # MagicDNS 이름도 확인 가능
+# 라우터에서 (예: LAN 이 192.168.0.0/24)
+sudo tailscale up --advertise-routes=192.168.0.0/24 --accept-routes
 ```
 
-> 서버가 tailnet 에 조인되어 있지 않으면 CI 가 `ssh: connect to host ... Connection timed out`
-> 으로 실패합니다. (Tailscale 자체 연결은 성공해도 SSH 대상이 없음)
+그다음 Tailscale 관리 콘솔 → **Machines → 해당 라우터 → Edit route settings** 에서
+광고된 서브넷(`192.168.0.0/24`)을 **승인(Approve)** 합니다.
 
-### 2-2. Docker 설치
+ACL 의 `tagOwners` 에 CI 태그를 등록하고, tag:ci 노드가 서브넷 경로를 쓸 수 있게 합니다.
+
+```jsonc
+{
+  "tagOwners": {
+    "tag:ci": ["autogroup:admin"]
+  }
+}
+```
+
+> `tailscale ping` 은 서브넷 경로 대상에는 동작하지 않으므로 워크플로에서 사용하지 않습니다.
+
+### 2-2. 서버 LAN IP 확인
+
+```bash
+# 배포 서버에서
+ip -4 addr show | grep inet      # 예: 192.168.0.10  → DEPLOY_HOST 에 등록
+```
+
+### 2-3. Docker 설치
 
 ```bash
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker "$USER"   # 재로그인 필요
 docker --version && docker compose version
 ```
-
-### 2-3. Tailscale SSH 활성화 (SSH 키 없이 접속하려는 경우)
-
-Tailscale 관리 콘솔 → **Access controls** 에서 tailnet ACL 에 `ssh` 규칙을 추가합니다.
-예시 (CI 러너 태그가 `tag:ci` 인 노드가 서버에 SSH 허용):
-
-```jsonc
-{
-  "tagOwners": {
-    "tag:ci": ["autogroup:admin"]
-  },
-  "ssh": [
-    {
-      "action": "accept",
-      "src": ["tag:ci"],
-      "dst": ["tag:server"],
-      "users": ["deploy"]
-    }
-  ]
-}
-```
-
-> SSH 키 방식(권장)을 쓸 경우 위 `ssh` 규칙은 생략하고, 3장에서
-> `DEPLOY_SSH_KEY` 만 등록하면 됩니다.
 
 ### 2-4. 배포 계정 및 디렉터리
 
@@ -199,8 +200,8 @@ ssh-copy-id -i mindfinder_ci.pub deploy@<DEPLOY_HOST>
 cat mindfinder_ci
 ```
 
-> Tailscale SSH 를 쓰면 `DEPLOY_SSH_KEY` 없이도 배포할 수 있습니다.
-> 이 경우 `deploy.yml` 의 "SSH 키 준비" 단계를 제거하세요.
+> 서버에 Tailscale 이 없으므로 **SSH 키 방식**을 사용합니다.
+> (`ssh-copy-id` 대상은 서버의 LAN IP)
 
 ---
 
@@ -225,9 +226,9 @@ docker compose logs -f --tail=100
 | 증상 | 원인 / 해결 |
 |---|---|
 | `OAuth identity empty` (즉시 실패) | OAuth 클라이언트에 `tag:ci` 권한 없음. ACL `tagOwners` 에 `tag:ci` 등록 + OAuth 클라이언트 Tags 에 `tag:ci` 지정 |
-| `ssh: connect to host ... Connection timed out` | **배포 서버가 tailnet 에 없음**. 서버에서 `sudo tailscale up --ssh` 실행 후 `DEPLOY_HOST`(Tailscale IP) 재확인 |
-| `Permission denied (publickey)` | `DEPLOY_SSH_KEY` 미등록 또는 서버 `authorized_keys` 누락. (Tailscale SSH 사용 시 `--ssh` 옵션 확인) |
-| `Host key verification failed` | `DEPLOY_HOST` 가 MagicDNS 이름인지 Tailscale IP 인지 확인 |
+| `ssh: connect to host ... Connection timed out` | 라우터 서브넷 라우트 미승인/미광고. 라우터 `--advertise-routes` + 콘솔 **route 승인** + `DEPLOY_HOST` 가 **LAN IP** 인지 확인 |
+| `Permission denied (publickey)` | `DEPLOY_SSH_KEY` 미등록 또는 서버 `authorized_keys` 누락 |
+| `Host key verification failed` | `DEPLOY_HOST`(서버 LAN IP) 도달 가능 여부 확인 |
 | `.env 파일이 없습니다` | 2-5 단계 미실행. 서버에 `.env` 생성 필요 |
 | 재시작 때 인증데이터가 사라짐 | `.env` 의 `RESET_VERIFICATIONS_ON_START=false` 로 설정 |
 | 봇이 로그인 못 함 | `DISCORD_TOKEN` 확인 + 개발자 포털 특권 인텐트 활성화 |
