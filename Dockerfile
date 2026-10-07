@@ -23,6 +23,8 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 # 소스 복사
 COPY bot ./bot
+# 약관/개인정보 전문 게시에 필요 (docs/PRIVACY.md, docs/TERMS.md)
+COPY docs ./docs
 COPY pyproject.toml README.md ./
 
 # 데이터/로그 디렉터리 (볼륨 마운트 지점)

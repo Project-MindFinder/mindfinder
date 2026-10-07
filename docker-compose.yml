@@ -1,26 +1,49 @@
 # ============================================
-# MindFinder 봇 docker-compose 구성
-# - SQLite DB 와 로그를 named volume 으로 영속화
-# - .env 파일에서 환경변수 로드
+# MindFinder 구성
+# - db        : PostgreSQL 컨테이너 (데이터 영속: named volume)
+# - mindfinder: 디스코드 봇 컨테이너 (DB 컨테이너에 연결)
+# - DB 데이터는 named volume 에 저장되어 컨테이너를 재생성해도 유지된다.
 # ============================================
 services:
+  db:
+    image: postgres:16-alpine
+    container_name: mindfinder-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mindfinder
+      # .env 의 POSTGRES_PASSWORD 사용 (없으면 기본값 mindfinder_pw)
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mindfinder_pw}
+      POSTGRES_DB: mindfinder
+      TZ: Asia/Seoul
+    volumes:
+      # 데이터 영속 볼륨 — 절대 삭제하지 말 것 (초기화 방지)
+      - mindfinder-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mindfinder -d mindfinder"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    # 외부 포트는 열지 않는다 (봇 컨테이너만 내부망으로 접근)
+
   mindfinder:
     build: .
     image: mindfinder-bot:latest
     container_name: mindfinder-bot
     restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
     env_file:
       - .env
     environment:
-      # 컨테이너 내부 경로 (볼륨과 일치)
-      DATABASE_PATH: /app/data/mindfinder.db
+      # SQLite 대신 DB 컨테이너를 사용한다.
+      DATABASE_URL: postgresql+asyncpg://mindfinder:${POSTGRES_PASSWORD:-mindfinder_pw}@db:5432/mindfinder
       LOG_DIR: /app/logs
     volumes:
-      - mindfinder-data:/app/data
       - mindfinder-logs:/app/logs
-    # 봇은 외부 포트를 열 필요 없음
     stop_grace_period: 15s
 
 volumes:
-  mindfinder-data:
+  # DB 데이터 (초기화 방지를 위해 절대 prune 하지 말 것)
+  mindfinder-db:
   mindfinder-logs:

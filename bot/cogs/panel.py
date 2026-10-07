@@ -22,6 +22,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.core import MindFinderBot
+from bot.db.seed import reset_verifications
 from bot.services.channels import (
     ADMIN_CHANNEL_KEY,
     ADMIN_CHANNEL_NAME,
@@ -2701,12 +2702,89 @@ class HelpPanelView(discord.ui.View):
 # --------------------------------------------------------------------------- #
 # 관리자 패널 (영구 뷰) — 🛠-관리자 채널
 # --------------------------------------------------------------------------- #
-class AdminPanelView(discord.ui.View):
-    """관리자 전용 패널: 병원 추가 요청 검토 / 약관 재게시 / 채널 재구성."""
+# 관리자 기능 드롭다운 옵션 (value → 표시)
+_ADMIN_OPTIONS: list[tuple[str, str, str]] = [
+    ("hospitals", "병원 추가 요청 검토", "🏥"),
+    ("hospitals_list", "병원 목록·삭제", "🗂️"),
+    ("knowledge", "지식기반 인증 심사", "🧠"),
+    ("reviews", "서류·기타 심사 목록", "📄"),
+    ("stats", "운영 통계", "📊"),
+    ("terms", "약관 재게시", "📜"),
+    ("channels", "채널 재구성", "🧭"),
+    ("maintain", "역할·채널 재정비", "🧹"),
+    ("names", "채널 이름·위치 재정비", "✏️"),
+    ("reset", "인증 이력 초기화", "🗑️"),
+    ("ping", "봇 상태", "🏓"),
+]
 
-    def __init__(self, bot: MindFinderBot) -> None:
-        super().__init__(timeout=None)
+
+class AdminPanelView(discord.ui.View):
+    """관리자 전용 패널: 드롭다운 하나로 모든 관리 기능을 제공한다.
+
+    - 패널 채널에 고정되는 **영구 뷰**(``is_panel=True``)에는 드롭다운이 있으며,
+      항목을 고르면 **나에게만 보이는 ephemeral 메시지 1개**를 새로 연다.
+    - 그 ephemeral 메시지의 드롭다운(``is_panel=False``)에서 기능을 실행하면,
+      결과를 **같은 메시지에 계속 덮어써서(edit)** 보여준다 → 메시지가 쌓이지 않는다.
+    """
+
+    def __init__(self, bot: MindFinderBot, *, is_panel: bool = True) -> None:
+        super().__init__(timeout=None if is_panel else 1800)
         self.bot = bot
+        self.is_panel = is_panel
+        select: discord.ui.Select = discord.ui.Select(
+            placeholder="🛠 관리자 기능 선택",
+            custom_id="mf:a_action" if is_panel else None,
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(label=label, value=value, emoji=emoji)
+                for value, label, emoji in _ADMIN_OPTIONS
+            ],
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        if not self._is_admin(interaction):
+            await self._deny(interaction)
+            return
+        # 영구 패널에서 고르면 → ephemeral 메시지 1개를 열고 그 안에서 조작한다.
+        if self.is_panel:
+            await interaction.response.send_message(
+                "🛠 **관리자 기능** — 아래에서 원하는 작업을 선택하세요.\n"
+                "(이 메시지는 나만 볼 수 있고, 작업 결과가 이 메시지에 계속 표시됩니다.)",
+                view=AdminPanelView(self.bot, is_panel=False),
+                ephemeral=True,
+            )
+            return
+        # ephemeral 메시지 안에서 고르면 → 같은 메시지에 결과를 덮어쓴다.
+        values = getattr(interaction.data, "get", lambda *_: None)("values") or []
+        value = values[0] if values else None
+        await self._dispatch(interaction, value)
+
+    async def _dispatch(
+        self, interaction: discord.Interaction, value: Optional[str]
+    ) -> None:
+        handlers = {
+            "hospitals": self.hospital_requests,
+            "hospitals_list": self.list_hospitals,
+            "knowledge": self.knowledge_review,
+            "reviews": self.review_list,
+            "stats": self.stats,
+            "terms": self.repost_terms,
+            "channels": self.rebuild_channels,
+            "maintain": self.maintain,
+            "names": self.channel_names,
+            "reset": self.reset_verifications,
+            "ping": self.ping,
+        }
+        handler = handlers.get(value or "")
+        if handler is None:
+            await interaction.response.edit_message(
+                content="알 수 없는 항목입니다.", view=self
+            )
+            return
+        await handler(interaction, None)
 
     def _is_admin(self, interaction: discord.Interaction) -> bool:
         perms = interaction.user.guild_permissions
@@ -2717,20 +2795,20 @@ class AdminPanelView(discord.ui.View):
             "관리자만 사용할 수 있습니다.", ephemeral=True
         )
 
-    @discord.ui.button(
-        label="병원 추가 요청 검토", style=discord.ButtonStyle.primary,
-        custom_id="mf:a_hospitals", row=0,
-    )
+    @staticmethod
+    def _panel_view(bot: MindFinderBot) -> "AdminPanelView":
+        """ephemeral 메시지에 계속 붙일 뷰(드롭다운 유지)."""
+        return AdminPanelView(bot, is_panel=False)
+
     async def hospital_requests(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
+        self, interaction: discord.Interaction, _button=None
     ) -> None:
-        if not self._is_admin(interaction):
-            await self._deny(interaction)
-            return
         pending = await self.bot.hospital_requests.list_by_status("pending")
         if not pending:
-            await interaction.response.send_message(
-                "대기 중인 병원 추가 요청이 없습니다.", ephemeral=True
+            await interaction.response.edit_message(
+                content="대기 중인 병원 추가 요청이 없습니다.",
+                embed=None,
+                view=self._panel_view(self.bot),
             )
             return
         embed = discord.Embed(
@@ -2749,8 +2827,10 @@ class AdminPanelView(discord.ui.View):
                 value=f"요청자: <@{req.user_id}>\n사유: {reason}",
                 inline=False,
             )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        # 각 요청에 대한 승인/거절 버튼을 관리자 채널에 게시한다.
+        await interaction.response.edit_message(
+            content=None, embed=embed, view=self._panel_view(self.bot)
+        )
+        # 각 요청 승인/거절 버튼을 관리자 채널에 게시한다.
         channel = interaction.channel
         if not isinstance(channel, discord.TextChannel):
             return
@@ -2766,82 +2846,37 @@ class AdminPanelView(discord.ui.View):
             except discord.HTTPException:
                 logger.exception("병원 요청 검토 게시 실패: request=%s", req.id)
 
-    @discord.ui.button(
-        label="약관 재게시", style=discord.ButtonStyle.secondary,
-        custom_id="mf:a_terms", row=0,
-    )
-    async def repost_terms(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
+    async def list_hospitals(
+        self, interaction: discord.Interaction, _button=None
     ) -> None:
-        if not self._is_admin(interaction):
-            await self._deny(interaction)
-            return
-        if interaction.guild is None:
-            await interaction.response.send_message(
-                "서버에서만 사용할 수 있습니다.", ephemeral=True
+        """등록된 병원 목록과 각 병원의 인증 이력 수를 보여준다."""
+        hospitals = await self.bot.hospitals.list_all()
+        lines: list[str] = []
+        for hospital in hospitals[:20]:
+            count = await self.bot.admissions.count_by_hospital(hospital.id)
+            ward = f" · {hospital.ward}" if getattr(hospital, "ward", None) else ""
+            lines.append(
+                f"• **{hospital.name}**{ward} (id={hospital.id}, 인증이력 {count})"
             )
-            return
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            await self.bot.terms_service.post_all(interaction.guild)
-        except Exception:  # noqa: BLE001
-            logger.exception("약관 재게시 실패: guild=%s", interaction.guild.id)
-            await interaction.followup.send(
-                "⚠️ 약관 재게시 중 오류가 발생했습니다.", ephemeral=True
-            )
-            return
-        await interaction.followup.send(
-            "✅ 이용약관·개인정보처리방침 전문을 다시 게시했습니다.", ephemeral=True
+        embed = discord.Embed(
+            title=f"🗂️ 등록 병원 ({len(hospitals)}곳)",
+            description="\n".join(lines) or "등록된 병원이 없습니다.",
+            color=discord.Color.dark_teal(),
+        )
+        await interaction.response.edit_message(
+            content=None, embed=embed, view=self._panel_view(self.bot)
         )
 
-    @discord.ui.button(
-        label="채널 재구성", style=discord.ButtonStyle.secondary,
-        custom_id="mf:a_channels", row=0,
-    )
-    async def rebuild_channels(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
-    ) -> None:
-        if not self._is_admin(interaction):
-            await self._deny(interaction)
-            return
-        if interaction.guild is None:
-            await interaction.response.send_message(
-                "서버에서만 사용할 수 있습니다.", ephemeral=True
-            )
-            return
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            await self.bot.channel_service.ensure_all(interaction.guild)
-            cog = interaction.client.get_cog("PanelCog")
-            if cog is not None:
-                await cog.ensure_panels(interaction.guild)
-        except Exception:  # noqa: BLE001
-            logger.exception("채널 재구성 실패: guild=%s", interaction.guild.id)
-            await interaction.followup.send(
-                "⚠️ 채널 재구성 중 오류가 발생했습니다. "
-                "봇에 '채널 관리' 권한이 있는지 확인해주세요.",
-                ephemeral=True,
-            )
-            return
-        await interaction.followup.send(
-            "✅ 용도별 채널/패널 구성을 완료했습니다.", ephemeral=True
-        )
-
-    @discord.ui.button(
-        label="지식기반 인증 심사", style=discord.ButtonStyle.primary,
-        custom_id="mf:a_knowledge", row=1,
-    )
     async def knowledge_review(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
+        self, interaction: discord.Interaction, _button=None
     ) -> None:
         """관리자 최종 승인 대기 중인 지식기반 인증을 보여준다."""
-        if not self._is_admin(interaction):
-            await self._deny(interaction)
-            return
         pending = await self.bot.knowledge.list_pending_review()
         if not pending:
-            await interaction.response.send_message(
-                "승인 대기 중인 지식기반 인증이 없습니다.", ephemeral=True
+            await interaction.response.edit_message(
+                content="승인 대기 중인 지식기반 인증이 없습니다.",
+                embed=None,
+                view=self._panel_view(self.bot),
             )
             return
         embed = discord.Embed(
@@ -2858,30 +2893,24 @@ class AdminPanelView(discord.ui.View):
                 value=f"신청자: <@{req.asker_id}>\n응답자: <@{req.respondent_id}>",
                 inline=False,
             )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.edit_message(
+            content=None, embed=embed, view=self._panel_view(self.bot)
+        )
 
-    @discord.ui.button(
-        label="서류·기타 심사 목록", style=discord.ButtonStyle.primary,
-        custom_id="mf:a_reviews", row=1,
-    )
     async def review_list(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
+        self, interaction: discord.Interaction, _button=None
     ) -> None:
         """대기 중인 서류 심사·기타 방법 인증 목록을 보여준다."""
-        if not self._is_admin(interaction):
-            await self._deny(interaction)
-            return
         docs = await self.bot.verifications.list_pending_by_method("document")
         others = await self.bot.verifications.list_pending_by_method("other")
         if not docs and not others:
-            await interaction.response.send_message(
-                "대기 중인 서류·기타 심사가 없습니다.", ephemeral=True
+            await interaction.response.edit_message(
+                content="대기 중인 서류·기타 심사가 없습니다.",
+                embed=None,
+                view=self._panel_view(self.bot),
             )
             return
-        embed = discord.Embed(
-            title="📄 대기 중인 심사",
-            color=discord.Color.orange(),
-        )
+        embed = discord.Embed(title="📄 대기 중인 심사", color=discord.Color.orange())
         if docs:
             embed.add_field(
                 name=f"서류 심사 ({len(docs)}건)",
@@ -2896,19 +2925,12 @@ class AdminPanelView(discord.ui.View):
                 ),
                 inline=False,
             )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.edit_message(
+            content=None, embed=embed, view=self._panel_view(self.bot)
+        )
 
-    @discord.ui.button(
-        label="운영 통계", style=discord.ButtonStyle.secondary,
-        custom_id="mf:a_stats", row=1,
-    )
-    async def stats(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
-    ) -> None:
+    async def stats(self, interaction: discord.Interaction, _button=None) -> None:
         """등록 이력·인증·매칭 등 운영 현황 요약을 보여준다."""
-        if not self._is_admin(interaction):
-            await self._deny(interaction)
-            return
         hospitals = await self.bot.hospitals.list_all()
         verified_ids = await self.bot.admissions.list_verified_hospital_ids()
         pending_hospitals = await self.bot.hospital_requests.list_by_status("pending")
@@ -2917,9 +2939,7 @@ class AdminPanelView(discord.ui.View):
         pending_knowledge = await self.bot.knowledge.list_pending_review()
         embed = discord.Embed(title="📊 운영 통계", color=discord.Color.blurple())
         embed.add_field(name="등록 병원", value=f"{len(hospitals)}곳", inline=True)
-        embed.add_field(
-            name="인증된 병원", value=f"{len(verified_ids)}곳", inline=True
-        )
+        embed.add_field(name="인증된 병원", value=f"{len(verified_ids)}곳", inline=True)
         embed.add_field(
             name="대기 심사",
             value=(
@@ -2929,75 +2949,124 @@ class AdminPanelView(discord.ui.View):
             ),
             inline=False,
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.edit_message(
+            content=None, embed=embed, view=self._panel_view(self.bot)
+        )
 
-    @discord.ui.button(
-        label="역할·채널 재정비", style=discord.ButtonStyle.secondary,
-        custom_id="mf:a_maintain", row=1,
-    )
-    async def maintain(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
+    async def ping(self, interaction: discord.Interaction, _button=None) -> None:
+        """봇 지연시간을 보여준다."""
+        latency = round(self.bot.latency * 1000)
+        await interaction.response.edit_message(
+            content=f"🏓 Pong! 지연 {latency}ms",
+            embed=None,
+            view=self._panel_view(self.bot),
+        )
+
+    async def repost_terms(
+        self, interaction: discord.Interaction, _button=None
     ) -> None:
-        """역할 이름 정리 + 인증 기반 병원 역할/채널 동기화를 실행한다."""
-        if not self._is_admin(interaction):
-            await self._deny(interaction)
-            return
         if interaction.guild is None:
-            await interaction.response.send_message(
-                "서버에서만 사용할 수 있습니다.", ephemeral=True
+            await interaction.response.edit_message(
+                content="서버에서만 사용할 수 있습니다.", view=self._panel_view(self.bot)
             )
             return
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
+        try:
+            await self.bot.terms_service.post_all(interaction.guild)
+            message = "✅ 이용약관·개인정보처리방침 전문을 다시 게시했습니다."
+        except Exception:  # noqa: BLE001
+            logger.exception("약관 재게시 실패: guild=%s", interaction.guild.id)
+            message = "⚠️ 약관 재게시 중 오류가 발생했습니다."
+        await interaction.edit_original_response(
+            content=message, embed=None, view=self._panel_view(self.bot)
+        )
+
+    async def rebuild_channels(
+        self, interaction: discord.Interaction, _button=None
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.edit_message(
+                content="서버에서만 사용할 수 있습니다.", view=self._panel_view(self.bot)
+            )
+            return
+        await interaction.response.defer()
+        try:
+            await self.bot.channel_service.ensure_all(interaction.guild)
+            cog = interaction.client.get_cog("PanelCog")
+            if cog is not None:
+                await cog.ensure_panels(interaction.guild)
+            message = "✅ 용도별 채널/패널 구성을 완료했습니다."
+        except Exception:  # noqa: BLE001
+            logger.exception("채널 재구성 실패: guild=%s", interaction.guild.id)
+            message = (
+                "⚠️ 채널 재구성 중 오류가 발생했습니다. "
+                "봇에 '채널 관리' 권한이 있는지 확인해주세요."
+            )
+        await interaction.edit_original_response(
+            content=message, embed=None, view=self._panel_view(self.bot)
+        )
+
+    async def maintain(self, interaction: discord.Interaction, _button=None) -> None:
+        """역할 이름 정리 + 인증 기반 병원 역할/채널 동기화를 실행한다."""
+        if interaction.guild is None:
+            await interaction.response.edit_message(
+                content="서버에서만 사용할 수 있습니다.", view=self._panel_view(self.bot)
+            )
+            return
+        await interaction.response.defer()
         try:
             await self.bot.channel_service.migrate_role_names(interaction.guild)
             await self.bot.channel_service.ensure_all(interaction.guild)
+            message = "✅ 역할 이름 정리와 인증 기반 채널 동기화를 완료했습니다."
         except Exception:  # noqa: BLE001
             logger.exception("역할·채널 재정비 실패: guild=%s", interaction.guild.id)
-            await interaction.followup.send(
-                "⚠️ 재정비 중 오류가 발생했습니다.", ephemeral=True
-            )
-            return
-        await interaction.followup.send(
-            "✅ 역할 이름 정리와 인증 기반 채널 동기화를 완료했습니다.", ephemeral=True
+            message = "⚠️ 재정비 중 오류가 발생했습니다."
+        await interaction.edit_original_response(
+            content=message, embed=None, view=self._panel_view(self.bot)
         )
 
-    @discord.ui.button(
-        label="채널 이름·위치 재정비", style=discord.ButtonStyle.secondary,
-        custom_id="mf:a_channel_names", row=2,
-    )
     async def channel_names(
-        self, interaction: discord.Interaction, _button: discord.ui.Button
+        self, interaction: discord.Interaction, _button=None
     ) -> None:
-        """봇이 관리하는 채널/카테고리를 **ID 기준**으로 찾아 이름·위치를 맞춘다.
-
-        사용자가 채널 이름이나 카테고리를 바꿔도 ID 로 추적하므로 다시 정리할 수 있다.
-        """
-        if not self._is_admin(interaction):
-            await self._deny(interaction)
-            return
+        """봇이 관리하는 채널/카테고리를 ID 기준으로 찾아 이름·위치를 맞춘다."""
         if interaction.guild is None:
-            await interaction.response.send_message(
-                "서버에서만 사용할 수 있습니다.", ephemeral=True
+            await interaction.response.edit_message(
+                content="서버에서만 사용할 수 있습니다.", view=self._panel_view(self.bot)
             )
             return
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
         records = await self.bot.managed_channels.list_for_guild(interaction.guild.id)
         fixed = 0
         for record in records:
             channel = interaction.guild.get_channel(record.discord_id)
             if channel is None:
                 continue
-            # 채널 이름이 DB 기록과 다르면 최신 이름으로 맞춘다.
             if getattr(channel, "name", None) != record.name:
                 try:
                     await channel.edit(name=record.name)
                     fixed += 1
                 except (discord.Forbidden, discord.HTTPException):
                     logger.debug("채널 이름 재정비 실패: %s", record.discord_id)
-        await interaction.followup.send(
-            f"✅ 채널/카테고리 {len(records)}개를 ID 기준으로 확인했고, "
-            f"{fixed}개 이름을 재정비했습니다.",
-            ephemeral=True,
+        await interaction.edit_original_response(
+            content=(
+                f"✅ 채널/카테고리 {len(records)}개를 ID 기준으로 확인했고, "
+                f"{fixed}개 이름을 재정비했습니다."
+            ),
+            embed=None,
+            view=self._panel_view(self.bot),
+        )
+
+    async def reset_verifications(
+        self, interaction: discord.Interaction, _button=None
+    ) -> None:
+        """인증 관련 데이터를 전면 초기화한다 (되돌릴 수 없음)."""
+        await interaction.response.defer()
+        removed = await reset_verifications(self.bot.db)
+        summary = ", ".join(f"{k}={v}" for k, v in removed.items() if v) or "삭제 없음"
+        await interaction.edit_original_response(
+            content=f"🗑️ 인증 이력 초기화 완료: {summary}",
+            embed=None,
+            view=self._panel_view(self.bot),
         )
 
 

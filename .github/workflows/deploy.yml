@@ -83,6 +83,8 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           GUILD_ID: ${{ secrets.GUILD_ID }}
+          # DB 컨테이너 비밀번호 (시크릿 미등록 시 기본값 사용)
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
         run: |
           # -v 로 어떤 키를 제시했고 왜 거부됐는지 로그에 남긴다.
           ssh -v -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 \
@@ -92,6 +94,7 @@ jobs:
           DISCORD_TOKEN=${DISCORD_TOKEN}
           GUILD_ID=${GUILD_ID}
           RESET_VERIFICATIONS_ON_START=false
+          POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-mindfinder_pw}
           EOF
 
       - name: 배포 실행

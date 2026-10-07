@@ -65,7 +65,8 @@ class MindFinderBot(commands.Bot):
         )
 
         self.settings = settings
-        self.db = Database(settings.database_path)
+        # 운영에서는 DATABASE_URL(PostgreSQL 등), 없으면 SQLite 파일을 쓴다.
+        self.db = Database(settings.database_url or settings.database_path)
 
         # 리포지토리 (DB 연결 후에도 재사용 가능한 객체)
         # 주의: discord.Client 는 users/guilds 등 읽기 전용 프로퍼티를 이미 정의하므로

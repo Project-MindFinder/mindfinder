@@ -9,8 +9,11 @@ python-dotenv>=1.0.1
 # SQLAlchemy 2.0 async ORM
 SQLAlchemy[asyncio]>=2.0.30,<3.0.0
 
-# SQLAlchemy 비동기 SQLite 드라이버
+# SQLAlchemy 비동기 SQLite 드라이버 (로컬/테스트)
 aiosqlite>=0.20.0
+
+# SQLAlchemy 비동기 PostgreSQL 드라이버 (운영 DB 컨테이너)
+asyncpg>=0.29.0
 
 # 시간대 처리 (KST 기준 연월 계산)
 tzdata>=2024.1

@@ -115,6 +115,9 @@ class Settings:
 
     # --- 경로 ---
     database_path: Path = field(default_factory=lambda: BASE_DIR / "data" / "mindfinder.db")
+    # 운영용 DB URL (예: postgresql+asyncpg://user:pw@db:5432/mindfinder).
+    # 지정되면 database_path(SQLite) 대신 이 URL 을 사용한다.
+    database_url: str | None = None
     log_dir: Path = field(default_factory=lambda: BASE_DIR / "logs")
 
     # --- 로깅 ---
@@ -198,6 +201,7 @@ def load_settings(env_file: str | os.PathLike[str] | None = None) -> Settings:
         database_path=_resolve_path(
             os.getenv("DATABASE_PATH", ""), BASE_DIR / "data" / "mindfinder.db"
         ),
+        database_url=os.getenv("DATABASE_URL", "").strip() or None,
         log_dir=_resolve_path(os.getenv("LOG_DIR", ""), BASE_DIR / "logs"),
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
     )
