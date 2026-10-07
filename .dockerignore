@@ -25,8 +25,10 @@ venv/
 .coverage
 htmlcov/
 
-# 테스트/문서 (런타임 불필요)
+# 테스트 (런타임 불필요)
 tests/
-docs/
+# 문서: 약관/개인정보 전문은 런타임에 게시하므로 이미지에 포함한다.
 *.md
 !README.md
+!docs/PRIVACY.md
+!docs/TERMS.md
