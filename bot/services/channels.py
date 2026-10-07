@@ -517,12 +517,16 @@ class ChannelService:
         tier1_role = await self.bot.access.tier_role(guild, 1)
         tier2_role = await self.bot.access.tier_role(guild, 2)
 
-        # 1) 인증 카테고리 (아무나 접근)
+        # 1) 인증 카테고리 (아무나 열람 가능하되 **메시지 전송은 금지**)
+        #    인증은 패널 드롭다운/모달로만 진행하므로 채널에 채팅·업로드할 필요가 없다.
         verify_cat = await self._ensure_category(
-            guild, VERIFY_CATEGORY_KEY, VERIFY_CATEGORY_NAME
+            guild,
+            VERIFY_CATEGORY_KEY,
+            VERIFY_CATEGORY_NAME,
+            self._overwrites(guild, public=True, readonly=True),
         )
-        # 인증 채널: 서류(PDF) 업로드가 가능해야 하므로 일반 전송 허용
-        public_ow = self._overwrites(guild, public=True)
+        # 인증 채널: 안내/패널 전용 → 사용자 전송 차단(readonly)
+        public_ow = self._overwrites(guild, public=True, readonly=True)
         await self._ensure_text(
             guild, VERIFY_CHANNEL_KEY, VERIFY_CHANNEL_NAME, verify_cat, public_ow
         )

@@ -46,6 +46,39 @@ from bot.utils.periods import PeriodError, format_ym, parse_period_input
 
 logger = logging.getLogger(__name__)
 
+
+async def show_step(
+    interaction: discord.Interaction,
+    *,
+    content: Optional[str] = None,
+    embed: Optional[discord.Embed] = None,
+    view: Optional[discord.ui.View] = None,
+) -> None:
+    """진행 단계를 **같은 ephemeral 메시지**에 덮어써 보여준다.
+
+    인증 흐름의 각 단계가 새 메시지를 보내면 사용자에게 계속 쌓이므로,
+    하나의 ephemeral 메시지를 만들고 이후 단계는 그것을 수정(edit)한다.
+    - 아직 응답 전이면 이 단계에서 처음 메시지를 만든다.
+    - 이미 응답했으면 원본 응답을 수정한다.
+    """
+    try:
+        if interaction.response.is_done():
+            await interaction.edit_original_response(
+                content=content, embed=embed, view=view
+            )
+        else:
+            await interaction.response.send_message(
+                content=content, embed=embed, view=view, ephemeral=True
+            )
+    except discord.HTTPException:
+        try:
+            await interaction.followup.send(
+                content=content, embed=embed, view=view, ephemeral=True
+            )
+        except discord.HTTPException:
+            logger.debug("단계 메시지 표시 실패")
+
+
 # 패널 메시지를 식별하는 푸터 마커 (중복 게시 방지)
 PANEL_MARKER = "MindFinder 안내 패널"
 # 자동 생성할 패널 채널 이름 (레거시 단일 패널용)
@@ -129,11 +162,12 @@ class HospitalChooseView(discord.ui.View):
             return
         if self.mode == "knowledge":
             # 지식기반 인증: 먼저 **입원 병원·기간**을 입력받고, 그 뒤에 질문을 낸다.
-            await interaction.response.send_message(
-                f"**{hospital_display_name(hospital.name)}**\n"
-                "지식기반 인증을 진행할 **입원 기간**을 선택하세요.",
+            await interaction.response.edit_message(
+                content=(
+                    f"**{hospital_display_name(hospital.name)}**\n"
+                    "지식기반 인증을 진행할 **입원 기간**을 선택하세요."
+                ),
                 view=PeriodPickerView(self.bot, self.service, hospital_id, "knowledge"),
-                ephemeral=True,
             )
             return
         if self.mode == "other":
@@ -152,10 +186,10 @@ class HospitalChooseView(discord.ui.View):
                 )
             )
             return
-        await interaction.response.send_message(
-            f"**{hospital_display_name(hospital.name)}** 입원 기간을 선택하세요.",
+        # 같은 ephemeral 메시지를 수정해 다음 단계(기간 선택)를 보여준다.
+        await interaction.response.edit_message(
+            content=f"**{hospital_display_name(hospital.name)}** 입원 기간을 선택하세요.",
             view=PeriodPickerView(self.bot, self.service, hospital_id, self.mode),
-            ephemeral=True,
         )
 
 
@@ -514,10 +548,12 @@ async def run_knowledge_verification(
     pool = await bot.knowledge.list_question_pool(hospital_id, start_ym, end_ym)
     pool = [q for q in pool if q.status in ("awaiting_answer", "awaiting_verdict")]
     if not pool:
-        await interaction.followup.send(
-            "이 병원·기간에 등록된 지식기반 질문이 아직 없습니다. "
-            "잠시 후 다시 시도하거나 서류 인증을 이용해주세요.",
-            ephemeral=True,
+        await show_step(
+            interaction,
+            content=(
+                "이 병원·기간에 등록된 지식기반 질문이 아직 없습니다. "
+                "잠시 후 다시 시도하거나 서류 인증을 이용해주세요."
+            ),
         )
         return
     question = random.choice(pool)
@@ -532,7 +568,8 @@ async def run_knowledge_verification(
         color=discord.Color.blurple(),
     )
     embed.set_footer(text="그 시기·병원에 실제로 있었던 사람만 답할 수 있는 질문입니다.")
-    await interaction.followup.send(
+    await show_step(
+        interaction,
         embed=embed,
         view=KnowledgeAnswerView(
             bot,
@@ -544,7 +581,6 @@ async def run_knowledge_verification(
             end_month=end_month,
             is_ongoing=is_ongoing,
         ),
-        ephemeral=True,
     )
 
 
@@ -1694,10 +1730,8 @@ class VerifyPanelView(discord.ui.View):
             view = await HospitalChooseView(
                 self.bot, self.vservice, "admission"
             ).load()
-            await inner.response.send_message(
-                "입원 이력을 등록할 **병원을 선택**하세요.",
-                view=view,
-                ephemeral=True,
+            await show_step(
+                inner, content="입원 이력을 등록할 **병원을 선택**하세요.", view=view
             )
 
         if not await ensure_consent(self.bot, interaction, _proceed):
@@ -1709,10 +1743,8 @@ class VerifyPanelView(discord.ui.View):
             view = await HospitalChooseView(
                 self.bot, self.vservice, "verify"
             ).load()
-            await inner.response.send_message(
-                "인증할 **병원을 선택**하세요.",
-                view=view,
-                ephemeral=True,
+            await show_step(
+                inner, content="인증할 **병원을 선택**하세요.", view=view
             )
 
         if not await ensure_consent(self.bot, interaction, _proceed):
@@ -1724,10 +1756,10 @@ class VerifyPanelView(discord.ui.View):
             view = await HospitalChooseView(
                 self.bot, self.vservice, "other"
             ).load()
-            await inner.response.send_message(
-                "기타 방법 인증을 진행할 **병원을 선택**하세요.",
+            await show_step(
+                inner,
+                content="기타 방법 인증을 진행할 **병원을 선택**하세요.",
                 view=view,
-                ephemeral=True,
             )
 
         if not await ensure_consent(self.bot, interaction, _proceed):
@@ -1740,10 +1772,8 @@ class VerifyPanelView(discord.ui.View):
             view = await HospitalChooseView(
                 self.bot, self.vservice, "knowledge"
             ).load()
-            await inner.response.send_message(
-                "지식기반 인증을 진행할 **병원을 선택**하세요.",
-                view=view,
-                ephemeral=True,
+            await show_step(
+                inner, content="지식기반 인증을 진행할 **병원을 선택**하세요.", view=view
             )
 
         if not await ensure_consent(self.bot, interaction, _proceed):
