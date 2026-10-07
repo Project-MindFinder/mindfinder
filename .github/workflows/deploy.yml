@@ -2,7 +2,7 @@
 # MindFinder CD
 # --------------------------------------------
 # GitHub Secrets (Settings > Secrets and variables > Actions):
-#   TS_OAUTH_CLIENT_ID  : Tailscale OAuth client ID (tag:ci)
+#   TS_OAUTH_CLIENT_ID  : Tailscale OAuth client ID
 #   TS_OAUTH_SECRET     : Tailscale OAuth client secret
 #   DEPLOY_HOST         : 서버 Tailscale IP
 #   DEPLOY_USER         : SSH 사용자 (deploy)
@@ -10,7 +10,6 @@
 #   DEPLOY_PATH         : /opt/mindfinder
 #   DISCORD_TOKEN       : 봇 토큰
 #   GUILD_ID            : 디스코드 서버 ID
-#   (선택) TS_OAUTH_TAGS
 # ============================================
 name: Deploy
 
@@ -35,7 +34,6 @@ jobs:
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: ${{ secrets.TS_OAUTH_TAGS || 'tag:ci' }}
 
       - name: SSH key
         run: |
