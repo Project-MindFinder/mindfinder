@@ -1,5 +1,13 @@
 # MindFinder 실배포 & CI/CD 초기 세팅 가이드
 
+> ⚠️ **필수 조건 3가지** (하나라도 빠지면 Deploy 가 실패한다)
+> 1. OAuth 클라이언트에 **`tag:ci`** 부여 + tailnet ACL `tagOwners` 에 `tag:ci` 등록
+>    → 없으면 `OAuth identity empty` 로 즉시 실패 (workflow 의 `tags: tag:ci` 는 고정값)
+> 2. **배포 서버가 tailnet 에 조인되어 있어야 함** → `sudo tailscale up --ssh`
+>    → 없으면 `ssh: connect to host ... Connection timed out`
+> 3. 서버 `/opt/mindfinder/.env` 에 `DISCORD_TOKEN`, `GUILD_ID`,
+>    `RESET_VERIFICATIONS_ON_START=false` 존재
+
 이 문서는 **GitHub 저장소 생성 → Tailscale 서버 접속 → CI/CD 자동배포**까지
 처음부터 끝까지의 절차를 정리한 것입니다. 위에서 아래로 그대로 따라 하면 됩니다.
 
@@ -71,11 +79,15 @@ git push -u origin main
 
 ```bash
 curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
+# --ssh: Tailscale SSH 활성화 (SSH 키 없이 CI 러너 접속 허용)
+sudo tailscale up --ssh --hostname mindfinder-server
 # 브라우저 인증 완료 후 사설 IP 확인
-tailscale ip -4        # 예: 100.x.y.z
+tailscale ip -4        # 예: 100.x.y.z  → DEPLOY_HOST 에 등록
 tailscale status       # MagicDNS 이름도 확인 가능
 ```
+
+> 서버가 tailnet 에 조인되어 있지 않으면 CI 가 `ssh: connect to host ... Connection timed out`
+> 으로 실패합니다. (Tailscale 자체 연결은 성공해도 SSH 대상이 없음)
 
 ### 2-2. Docker 설치
 
@@ -162,17 +174,18 @@ GitHub Actions 러너가 tailnet 에 안전하게 조인하려면 OAuth 클라�
 ## 4. GitHub Actions Secrets 등록
 
 저장소 → **Settings → Secrets and variables → Actions → New repository secret**
-아래 6개(+선택 1개)를 등록합니다.
+아래 항목을 등록합니다. (노드 태그 `tag:ci` 는 워크플로에 **고정**되어 있어 시크릿이 필요 없습니다.)
 
 | Secret | 필수 | 설명 / 예시 |
 |---|---|---|
 | `TS_OAUTH_CLIENT_ID` | ✅ | 3장에서 발급한 OAuth Client ID |
 | `TS_OAUTH_SECRET` | ✅ | 3장에서 발급한 OAuth Client Secret |
-| `TS_OAUTH_TAGS` | ⬜ | 노드 태그 (기본 `tag:ci`) |
 | `DEPLOY_HOST` | ✅ | 서버 Tailscale IP 또는 MagicDNS 이름 (`100.x.y.z`) |
 | `DEPLOY_USER` | ✅ | SSH 사용자 (`deploy`) |
 | `DEPLOY_SSH_KEY` | ✅ | SSH 개인키 (아래 4-1 참고) |
 | `DEPLOY_PATH` | ✅ | 서버 clone 경로 (`/opt/mindfinder`) |
+| `DISCORD_TOKEN` | ✅ | 봇 토큰 (서버 `.env` 로 자동 작성) |
+| `GUILD_ID` | ✅ | 디스코드 서버 ID |
 
 ### 4-1. SSH 키 생성 (로컬에서 1회)
 
@@ -211,8 +224,9 @@ docker compose logs -f --tail=100
 
 | 증상 | 원인 / 해결 |
 |---|---|
-| Actions 에서 `ts oauth` 실패 | OAuth scopes/tags 불일치. `tag:ci` 가 ACL `tagOwners` 에 등록됐는지 확인 |
-| `Permission denied (publickey)` | `DEPLOY_SSH_KEY` 미등록 또는 서버 `authorized_keys` 누락 |
+| `OAuth identity empty` (즉시 실패) | OAuth 클라이언트에 `tag:ci` 권한 없음. ACL `tagOwners` 에 `tag:ci` 등록 + OAuth 클라이언트 Tags 에 `tag:ci` 지정 |
+| `ssh: connect to host ... Connection timed out` | **배포 서버가 tailnet 에 없음**. 서버에서 `sudo tailscale up --ssh` 실행 후 `DEPLOY_HOST`(Tailscale IP) 재확인 |
+| `Permission denied (publickey)` | `DEPLOY_SSH_KEY` 미등록 또는 서버 `authorized_keys` 누락. (Tailscale SSH 사용 시 `--ssh` 옵션 확인) |
 | `Host key verification failed` | `DEPLOY_HOST` 가 MagicDNS 이름인지 Tailscale IP 인지 확인 |
 | `.env 파일이 없습니다` | 2-5 단계 미실행. 서버에 `.env` 생성 필요 |
 | 재시작 때 인증데이터가 사라짐 | `.env` 의 `RESET_VERIFICATIONS_ON_START=false` 로 설정 |

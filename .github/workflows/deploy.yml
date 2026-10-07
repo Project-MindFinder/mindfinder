@@ -1,15 +1,26 @@
 # ============================================
-# MindFinder CD
+# MindFinder CD: Tailscale 로 서버에 접속해 Docker 로 배포
 # --------------------------------------------
-# GitHub Secrets (Settings > Secrets and variables > Actions):
-#   TS_OAUTH_CLIENT_ID  : Tailscale OAuth client ID
+# 동작 순서
+#   1) GitHub 러너가 Tailscale(ephemeral 노드, tag:ci)로 tailnet 에 조인
+#   2) DEPLOY_HOST(서버 Tailscale IP/MagicDNS) 로 tailscale ping 으로 연결 확인
+#   3) SSH 로 서버에 접속해 .env 작성 후 docker compose 재기동
+#
+# 필요한 GitHub Secrets (Settings > Secrets and variables > Actions)
+#   TS_OAUTH_CLIENT_ID  : Tailscale OAuth client ID  (tag:ci 권한 필요)
 #   TS_OAUTH_SECRET     : Tailscale OAuth client secret
-#   DEPLOY_HOST         : 서버 Tailscale IP
-#   DEPLOY_USER         : SSH 사용자 (deploy)
-#   DEPLOY_SSH_KEY      : SSH 개인키 전체
-#   DEPLOY_PATH         : /opt/mindfinder
-#   DISCORD_TOKEN       : 봇 토큰
+#   DEPLOY_HOST         : 배포 서버의 Tailscale IP 또는 MagicDNS 이름
+#   DEPLOY_USER         : SSH 사용자 (예: deploy)
+#   DEPLOY_SSH_KEY      : SSH 개인키 (ed25519 권장)
+#   DEPLOY_PATH         : 서버에서 이 저장소가 clone 된 절대경로
+#   DISCORD_TOKEN       : 봇 토큰 (서버 .env 로 전달)
 #   GUILD_ID            : 디스코드 서버 ID
+#
+# [중요] Tailscale OAuth 로 조인하려면 반드시 tag 가 필요하다.
+#   - 아래 `tags: tag:ci` 는 고정값이다. (시크릿으로 두지 않음)
+#   - OAuth 클라이언트에 tag:ci 를 부여하고, tailnet ACL 의 tagOwners 에
+#     "tag:ci" 가 등록되어 있어야 한다. (없으면 'OAuth identity empty' 오류)
+#   - 배포 서버도 반드시 tailnet 에 조인되어 있어야 한다. (scripts/setup-server.sh)
 # ============================================
 name: Deploy
 
@@ -29,30 +40,47 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Tailscale
+      - name: Tailscale 연결
         uses: tailscale/github-action@v3
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          # OAuth 조인에는 태그가 필수 (제거하면 'OAuth identity empty' 로 즉시 실패)
+          tags: tag:ci
+          # 서버가 tailnet 에 있는지 미리 ping 으로 확인 (없으면 여기서 명확히 실패)
+          targets: ${{ secrets.DEPLOY_HOST }}
 
-      - name: SSH key
+      - name: SSH 키 준비
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
-      - name: Write .env on server
+      - name: 서버에 .env 작성
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          GUILD_ID: ${{ secrets.GUILD_ID }}
         run: |
-          ssh -o StrictHostKeyChecking=accept-new ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "cat > ${{ secrets.DEPLOY_PATH }}/.env" << EOF
-          DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }}
-          GUILD_ID=${{ secrets.GUILD_ID }}
+          ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "cat > '${DEPLOY_PATH}/.env'" <<EOF
+          DISCORD_TOKEN=${DISCORD_TOKEN}
+          GUILD_ID=${GUILD_ID}
           RESET_VERIFICATIONS_ON_START=false
           EOF
 
-      - name: Deploy
-        run: |
-          ssh -o StrictHostKeyChecking=accept-new ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} 'bash -s' < scripts/deploy.sh
+      - name: 배포 실행
         env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_BRANCH: main
+        run: |
+          ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "DEPLOY_PATH='${DEPLOY_PATH}' DEPLOY_BRANCH='${DEPLOY_BRANCH}' bash -s" \
+            < scripts/deploy.sh
