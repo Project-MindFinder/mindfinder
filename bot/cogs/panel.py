@@ -173,10 +173,14 @@ class HospitalChooseView(discord.ui.View):
             )
             return
         if self.mode == "knowledge":
-            # 지식기반 인증: '입원 기간'이 아니라 **해당 사건이 언제 일어났는지**를
-            # 연/월/일로 입력받는다. (매칭은 연/월 기준, 일은 텍스트로 보관)
-            await interaction.response.send_modal(
-                KnowledgeDateModal(self.bot, self.service, hospital_id)
+            # 지식기반 인증: **입원 기간을 월 단위(연/월 범위)** 로 입력받고,
+            # 그 기간에 맞는 질문을 제시한다.
+            await interaction.response.edit_message(
+                content=(
+                    f"**{hospital_display_name(hospital.name)}**\n"
+                    "인증할 **입원 기간**을 월 단위로 선택하세요."
+                ),
+                view=PeriodPickerView(self.bot, self.service, hospital_id, "knowledge"),
             )
             return
         if self.mode == "other":
@@ -339,16 +343,10 @@ class PeriodPickerView(discord.ui.View):
             )
             return
         if self.mode == "knowledge_ask":
+            # 질문 등록: '입원 기간'이 아니라 **해당 사건이 대략적으로 언제** 일어났는지
+            # 연/월/일로 받는다. (일은 참고용 텍스트, 풀 매칭은 연/월 기준)
             await interaction.response.send_modal(
-                KnowledgeQuestionModal(
-                    self.bot,
-                    hospital_id=self.hospital_id,
-                    start_year=start_year,
-                    start_month=start_month,
-                    end_year=end_year,
-                    end_month=end_month,
-                    is_ongoing=is_ongoing,
-                )
+                KnowledgeDateModal(self.bot, self.service, self.hospital_id)
             )
             return
 
@@ -537,10 +535,10 @@ class KnowledgeAnswerModal(discord.ui.Modal, title="지식기반 인증 답변")
         )
 
 
-class KnowledgeDateModal(discord.ui.Modal, title="지식기반 인증 — 사건 시점"):
-    """지식기반 인증에서 **해당 사건이 대략적으로 언제 일어났는지**를 받는다.
+class KnowledgeDateModal(discord.ui.Modal, title="지식기반 질문 등록"):
+    """질문 등록 시 **해당 사건이 대략적으로 언제 일어났는지**를 받는다.
 
-    연/월/일을 입력받는다. 매칭·질문 풀은 **연/월** 기준으로 처리하고,
+    연/월/일과 질문을 입력받는다. 질문 풀 매칭은 **연/월** 기준으로 하고,
     일(day)은 참고용 텍스트로 기간 설명에 덧붙인다.
     """
 
@@ -561,6 +559,13 @@ class KnowledgeDateModal(discord.ui.Modal, title="지식기반 인증 — 사건
         placeholder="예: 15 (모르면 비워두세요)",
         required=False,
         max_length=2,
+    )
+    질문 = discord.ui.TextInput(
+        label="질문",
+        placeholder="그 시기·병원에 있었던 사람만 아는 질문을 적어주세요.",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=500,
     )
 
     def __init__(
@@ -600,49 +605,31 @@ class KnowledgeDateModal(discord.ui.Modal, title="지식기반 인증 — 사건
             else:
                 day_text = f" ({raw_day})"
 
-        hospital = await self.bot.hospitals.get_by_id(self.hospital_id)
-        if hospital is None:
-            await interaction.response.send_message(
-                "⚠️ 병원을 찾을 수 없습니다.", ephemeral=True
-            )
-            return
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        def _ym(year: int, month: int) -> int:
+            return year * 12 + (month - 1)
 
-        # 이력 등록(자기 신고) — 매칭은 연/월 기준. 종료월 없음 → '입원 중' 처리.
-        try:
-            await self.service.register_admission(
-                user_id=interaction.user.id,
-                hospital_name=hospital.name,
-                start_year=start_year,
-                start_month=start_month,
-                end_year=None,
-                end_month=None,
-                is_ongoing=True,
-            )
-        except PeriodError as exc:
-            await interaction.followup.send(f"⚠️ {exc}", ephemeral=True)
-            return
-        if interaction.guild is not None:
-            member = interaction.guild.get_member(interaction.user.id)
-            if member is not None:
-                try:
-                    await self.bot.access.grant_tier(interaction.guild, member, 1)
-                except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "1단계 역할 부여 실패: user=%s", interaction.user.id
-                    )
-
-        # 사건 시점(연/월/일)을 질문 풀 검색 기간에 반영한다.
-        await run_knowledge_verification(
-            self.bot,
-            interaction,
+        start_ym = _ym(start_year, start_month)
+        # 사건 시점(연/월)을 기간으로 등록한다. 일은 참고용 텍스트로 덧붙인다.
+        period_text = f"{start_year}년 {start_month}월{day_text}"
+        hospital_name = await self.bot.knowledge_service.hospital_name(
+            self.hospital_id
+        )
+        request_id, message = await self.bot.knowledge_service.submit_question(
+            interaction.user.id,
             hospital_id=self.hospital_id,
-            start_year=start_year,
-            start_month=start_month,
-            end_year=None,
-            end_month=None,
-            is_ongoing=True,
-            day_text=day_text,
+            admit_ym=start_ym,
+            discharge_ym=start_ym,
+            period_text=f"{hospital_name} {period_text}",
+            question=str(self.질문.value or ""),
+        )
+        if request_id is None:
+            await interaction.response.send_message(f"⚠️ {message}", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"✅ 질문이 등록되었습니다 (질문번호 `{request_id}`).\n"
+            f"**{hospital_display_name(hospital_name)} {period_text}** 시점을 "
+            "선택한 사람에게 무작위로 제시됩니다.",
+            ephemeral=True,
         )
 
 
