@@ -2731,9 +2731,11 @@ class AdminPanelView(discord.ui.View):
         super().__init__(timeout=None if is_panel else 1800)
         self.bot = bot
         self.is_panel = is_panel
+        # ephemeral 뷰는 영구 저장이 필요 없으므로 custom_id 를 매번 새로 생성한다.
+        # (discord.py 는 Select 의 custom_id 에 None 을 허용하지 않는다.)
         select: discord.ui.Select = discord.ui.Select(
             placeholder="🛠 관리자 기능 선택",
-            custom_id="mf:a_action" if is_panel else None,
+            custom_id="mf:a_action" if is_panel else f"mf:a_action:{id(self)}",
             min_values=1,
             max_values=1,
             options=[
