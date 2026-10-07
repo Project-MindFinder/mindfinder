@@ -62,6 +62,12 @@ jobs:
           printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+          # 키 형식 검증 (실패 시 시크릿이 공개키이거나 형식이 깨진 것)
+          echo "--- 키 지문 (지문만 출력, 비밀값 아님) ---"
+          ssh-keygen -lf ~/.ssh/id_ed25519 || {
+            echo "::error title=SSH 키 형식 오류::DEPLOY_SSH_KEY 가 유효한 개인키가 아닙니다. (공개키를 넣었거나 앞뒤 공백/줄바꿈 문제)"
+            exit 1
+          }
 
       - name: 서버에 .env 작성
         env:
@@ -71,7 +77,9 @@ jobs:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           GUILD_ID: ${{ secrets.GUILD_ID }}
         run: |
-          ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 \
+          # -v 로 어떤 키를 제시했고 왜 거부됐는지 로그에 남긴다.
+          ssh -v -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 \
+            -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519 \
             "${DEPLOY_USER}@${DEPLOY_HOST}" \
             "cat > '${DEPLOY_PATH}/.env'" <<EOF
           DISCORD_TOKEN=${DISCORD_TOKEN}
@@ -87,6 +95,7 @@ jobs:
           DEPLOY_BRANCH: main
         run: |
           ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 \
+            -o IdentitiesOnly=yes -i ~/.ssh/id_ed25519 \
             "${DEPLOY_USER}@${DEPLOY_HOST}" \
             "DEPLOY_PATH='${DEPLOY_PATH}' DEPLOY_BRANCH='${DEPLOY_BRANCH}' bash -s" \
             < scripts/deploy.sh
