@@ -173,13 +173,10 @@ class HospitalChooseView(discord.ui.View):
             )
             return
         if self.mode == "knowledge":
-            # 지식기반 인증: 먼저 **입원 병원·기간**을 입력받고, 그 뒤에 질문을 낸다.
-            await interaction.response.edit_message(
-                content=(
-                    f"**{hospital_display_name(hospital.name)}**\n"
-                    "지식기반 인증을 진행할 **입원 기간**을 선택하세요."
-                ),
-                view=PeriodPickerView(self.bot, self.service, hospital_id, "knowledge"),
+            # 지식기반 인증: '입원 기간'이 아니라 **해당 사건이 언제 일어났는지**를
+            # 연/월/일로 입력받는다. (매칭은 연/월 기준, 일은 텍스트로 보관)
+            await interaction.response.send_modal(
+                KnowledgeDateModal(self.bot, self.service, hospital_id)
             )
             return
         if self.mode == "other":
@@ -482,6 +479,7 @@ class KnowledgeAnswerModal(discord.ui.Modal, title="지식기반 인증 답변")
         end_year: Optional[int],
         end_month: Optional[int],
         is_ongoing: bool,
+        day_text: str = "",
     ) -> None:
         super().__init__()
         self.bot = bot
@@ -492,6 +490,7 @@ class KnowledgeAnswerModal(discord.ui.Modal, title="지식기반 인증 답변")
         self.end_year = end_year
         self.end_month = end_month
         self.is_ongoing = is_ongoing
+        self.day_text = day_text
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -538,6 +537,115 @@ class KnowledgeAnswerModal(discord.ui.Modal, title="지식기반 인증 답변")
         )
 
 
+class KnowledgeDateModal(discord.ui.Modal, title="지식기반 인증 — 사건 시점"):
+    """지식기반 인증에서 **해당 사건이 대략적으로 언제 일어났는지**를 받는다.
+
+    연/월/일을 입력받는다. 매칭·질문 풀은 **연/월** 기준으로 처리하고,
+    일(day)은 참고용 텍스트로 기간 설명에 덧붙인다.
+    """
+
+    연도 = discord.ui.TextInput(
+        label="사건이 일어난 연도",
+        placeholder="예: 2021",
+        required=True,
+        max_length=4,
+    )
+    월 = discord.ui.TextInput(
+        label="월",
+        placeholder="예: 3",
+        required=True,
+        max_length=2,
+    )
+    일 = discord.ui.TextInput(
+        label="일 (대략적이어도 됩니다)",
+        placeholder="예: 15 (모르면 비워두세요)",
+        required=False,
+        max_length=2,
+    )
+
+    def __init__(
+        self,
+        bot: MindFinderBot,
+        service: VerificationService,
+        hospital_id: int,
+    ) -> None:
+        super().__init__()
+        self.bot = bot
+        self.service = service
+        self.hospital_id = hospital_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            start_year = int(str(self.연도.value).strip())
+            start_month = int(str(self.월.value).strip())
+        except ValueError:
+            await interaction.response.send_message(
+                "⚠️ 연도와 월은 숫자로 입력해주세요.", ephemeral=True
+            )
+            return
+        if not (1 <= start_month <= 12):
+            await interaction.response.send_message(
+                "⚠️ 월은 1~12 사이여야 합니다.", ephemeral=True
+            )
+            return
+        raw_day = str(self.일.value or "").strip()
+        day_text = ""
+        if raw_day:
+            try:
+                day = int(raw_day)
+            except ValueError:
+                day = 0
+            if 1 <= day <= 31:
+                day_text = f" {day}일"
+            else:
+                day_text = f" ({raw_day})"
+
+        hospital = await self.bot.hospitals.get_by_id(self.hospital_id)
+        if hospital is None:
+            await interaction.response.send_message(
+                "⚠️ 병원을 찾을 수 없습니다.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        # 이력 등록(자기 신고) — 매칭은 연/월 기준. 종료월 없음 → '입원 중' 처리.
+        try:
+            await self.service.register_admission(
+                user_id=interaction.user.id,
+                hospital_name=hospital.name,
+                start_year=start_year,
+                start_month=start_month,
+                end_year=None,
+                end_month=None,
+                is_ongoing=True,
+            )
+        except PeriodError as exc:
+            await interaction.followup.send(f"⚠️ {exc}", ephemeral=True)
+            return
+        if interaction.guild is not None:
+            member = interaction.guild.get_member(interaction.user.id)
+            if member is not None:
+                try:
+                    await self.bot.access.grant_tier(interaction.guild, member, 1)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "1단계 역할 부여 실패: user=%s", interaction.user.id
+                    )
+
+        # 사건 시점(연/월/일)을 질문 풀 검색 기간에 반영한다.
+        await run_knowledge_verification(
+            self.bot,
+            interaction,
+            hospital_id=self.hospital_id,
+            start_year=start_year,
+            start_month=start_month,
+            end_year=None,
+            end_month=None,
+            is_ongoing=True,
+            day_text=day_text,
+        )
+
+
 async def run_knowledge_verification(
     bot: MindFinderBot,
     interaction: discord.Interaction,
@@ -548,6 +656,7 @@ async def run_knowledge_verification(
     end_year: Optional[int],
     end_month: Optional[int],
     is_ongoing: bool,
+    day_text: str = "",
 ) -> None:
     """기간 선택 후, 해당 병원·기간 질문 풀에서 무작위로 하나를 내고 답변받는다."""
     def _ym(year: int, month: int) -> int:
@@ -570,11 +679,14 @@ async def run_knowledge_verification(
         return
     question = random.choice(pool)
     hospital_name = await bot.knowledge_service.hospital_name(hospital_id)
+    # 사건 시점: 연/월 (+ 일은 입력했으면 덧붙임)
+    when_text = f"{start_year}년 {start_month}월{day_text}"
     embed = discord.Embed(
         title="❓ 지식기반 인증 질문",
         description=(
             f"**병원**: {hospital_display_name(hospital_name)}\n"
-            f"**기간**: {question.period_text}\n\n"
+            f"**해당 사건 시점(대략)**: {when_text}\n"
+            f"**질문 기간**: {question.period_text}\n\n"
             f"**질문**: {question.question}"
         ),
         color=discord.Color.blurple(),
@@ -592,6 +704,7 @@ async def run_knowledge_verification(
             end_year=end_year,
             end_month=end_month,
             is_ongoing=is_ongoing,
+            day_text=day_text,
         ),
     )
 
@@ -610,6 +723,7 @@ class KnowledgeAnswerView(discord.ui.View):
         end_year: Optional[int],
         end_month: Optional[int],
         is_ongoing: bool,
+        day_text: str = "",
     ) -> None:
         super().__init__(timeout=600)
         self.bot = bot
@@ -621,6 +735,7 @@ class KnowledgeAnswerView(discord.ui.View):
             end_year=end_year,
             end_month=end_month,
             is_ongoing=is_ongoing,
+            day_text=day_text,
         )
 
     @discord.ui.button(label="답변 작성", style=discord.ButtonStyle.primary)
